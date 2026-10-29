@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whiteboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header id="toolbar">
+  <div class="group" role="radiogroup" aria-label="Tool">
+    <button data-tool="select" class="tool active" title="Select, move, resize. Drag empty space to box-select. Shift/Ctrl+click adds (S)">Select</button>
+    <button data-tool="pan" class="tool" title="Drag the canvas. Also: hold Space, or use the middle mouse button (H)">Pan</button>
+    <button data-tool="controller" class="tool" title="Drag out a Controller rectangle (C)">Controller</button>
+    <button data-tool="controlled_process" class="tool" title="Drag out a Controlled Process rectangle (P)">Controlled Process</button>
+    <button data-tool="control_action" class="tool" title="Drag from one rectangle to another (A)">Control Action</button>
+    <button data-tool="feedback" class="tool" title="Drag from one rectangle to another (F)">Feedback</button>
+  </div>
+  <div class="group">
+    <label>Colour <input type="color" id="colour" value="#2563eb"></label>
+    <label>Arrow line
+      <select id="style">
+        <option value="full">Full</option>
+        <option value="dashed">Dashed</option>
+      </select>
+    </label>
+  </div>
+  <div class="group">
+    <button id="view-toggle" title="Show the entity tables, or go back to the diagram">Tables</button>
+    <button id="home" title="Return the view to your diagram">Home</button>
+    <button id="delete" disabled title="Delete the selected item (Delete)">Delete</button>
+    <span id="status" role="status">Loading…</span>
+  </div>
+</header>
+<main id="scroller">
+  <section id="tables" hidden aria-label="Entity tables"></section>
+  <svg id="board" xmlns="http://www.w3.org/2000/svg"><defs id="defs"></defs><g id="world"><g id="edges"></g><g id="nodes"></g><g id="handles"></g><g id="overlay"></g></g></svg>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

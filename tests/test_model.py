@@ -205,6 +205,117 @@ class ColoursAndShownFields(unittest.TestCase):
                 self.assertEqual([c["key"] for c in t["columns"]], [k for k, _ in model.FIELDS[t["key"]]])
 
 
+class PinnedRoutePoints(unittest.TestCase):
+    NODES = [node("C1"), node("CP1", "controlled_process")]
+
+    def test_arrows_have_no_pinned_points_by_default_and_they_round_trip(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [
+            edge("A1", "C1", "CP1"), edge("A2", "C1", "CP1", via=[[10, 20], [30.5, -40]])]})
+        self.assertEqual((d.edges[0].via, d.edges[1].via), ([], [[10.0, 20.0], [30.5, -40.0]]))
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+
+    def test_dragged_segments_carry_their_axis(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", via=[[10, 20, 0], [30, 40, 1], [5, 6]])]})
+        self.assertEqual(d.edges[0].via, [[10.0, 20.0, 0], [30.0, 40.0, 1], [5.0, 6.0]])
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+
+    def test_floating_ends_are_allowed(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", source_anchor=None, target_anchor=None)]})
+        self.assertEqual((d.edges[0].source_anchor, d.edges[0].target_anchor), (None, None))
+
+    def test_bad_pinned_points_rejected(self):
+        for bad in ("x", 5, [1], [[1]], [[1, 2, 2]], [[1, 2, True]], [[1, 2, 0.5]], [[1, 2, 0, 0]], [["a", 1]], [[True, 1]], [[float("nan"), 0]], [[0, float("inf")]],
+                    [[0, 0]] * (model.MAX_VIA + 1)):
+            with self.subTest(bad=bad), self.assertRaises(DiagramError):
+                Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", via=bad)]})
+
+
+class HiddenArrows(unittest.TestCase):
+    NODES = [node("C1"), node("CP1", "controlled_process")]
+
+    def test_arrows_are_visible_by_default_and_hiding_round_trips(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1"), edge("A2", "C1", "CP1", hidden=True)]})
+        self.assertEqual([e.hidden for e in d.edges], [False, True])
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+
+    def test_hidden_arrows_still_get_table_rows_and_links(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", hidden=True)]})
+        tables = {t["key"]: t for t in model.tables(d)}
+        self.assertEqual([r["id"] for r in tables["control_action"]["rows"]], ["A1"])
+        self.assertEqual(tables["controller"]["rows"][0]["outgoing"], ["A1"])
+
+    def test_hidden_must_be_true_or_false(self):
+        for bad in ("yes", 1, 0, [], {}):
+            with self.subTest(bad=bad), self.assertRaises(DiagramError):
+                Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", hidden=bad)]})
+
+
+class DescriptionAndEffect(unittest.TestCase):
+    NODES = [node("C1"), node("CP1", "controlled_process")]
+
+    def test_default_empty_and_round_trip(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [
+            edge("A1", "C1", "CP1"), edge("A2", "C1", "CP1", description="Open the valve"),
+            edge("F1", "CP1", "C1", "feedback", effect="Controller learns the valve is open")]})
+        self.assertEqual([(e.description, e.effect) for e in d.edges],
+                         [("", ""), ("Open the valve", ""), ("", "Controller learns the valve is open")])
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+
+    def test_each_field_belongs_to_one_type_of_arrow(self):
+        with self.assertRaises(DiagramError):
+            Diagram.from_dict({"nodes": self.NODES, "edges": [edge("F1", "CP1", "C1", "feedback", description="x")]})
+        with self.assertRaises(DiagramError):
+            Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", effect="x")]})
+        # Empty is fine on either, so a form that always sends both fields still works.
+        Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", description="", effect="")]})
+
+    def test_must_be_text_and_long_text_is_cut_at_the_limit(self):
+        for bad in (5, ["x"], None):
+            with self.subTest(bad=bad), self.assertRaises(DiagramError):
+                Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", description=bad)]})
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", description="x" * 5000)]})
+        self.assertEqual(len(d.edges[0].description), model.LONG_TEXT)
+
+    def test_each_has_its_own_column_and_can_be_shown_on_the_diagram(self):
+        t = {x["key"]: x for x in model.tables(Diagram())}
+        self.assertEqual([c["key"] for c in t["control_action"]["columns"]], ["id", "name", "description", "line", "source", "target"])
+        self.assertEqual([c["key"] for c in t["feedback"]["columns"]], ["id", "name", "effect", "line", "source", "target"])
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", shown=["description", "id"])]})
+        self.assertEqual(d.edges[0].shown, ["id", "description"])
+        with self.assertRaises(DiagramError):  # a Feedback has no description to show
+            Diagram.from_dict({"nodes": self.NODES, "edges": [edge("F1", "CP1", "C1", "feedback", shown=["description"])]})
+
+    def test_table_rows_carry_the_text(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [
+            edge("A1", "C1", "CP1", description="Open the valve"),
+            edge("F1", "CP1", "C1", "feedback", effect="Controller sees it open")]})
+        t = {x["key"]: x for x in model.tables(d)}
+        self.assertEqual(t["control_action"]["rows"][0]["description"], "Open the valve")
+        self.assertEqual(t["feedback"]["rows"][0]["effect"], "Controller sees it open")
+
+
+class FileFormat(unittest.TestCase):
+    def test_saved_file_is_labelled_indented_json(self):
+        d = Diagram.from_dict({"nodes": [node("C1", label="Pump controller")]})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "d.json"
+            model.save(d, path)
+            text = path.read_text()
+        self.assertTrue(text.startswith('{\n  "format": "whiteboard-diagram",\n  "format_version": 1,'))
+        self.assertIn('\n      "label": "Pump controller",', text)  # one field per line, readable in an editor
+        self.assertEqual(Diagram.from_dict(json.loads(text)), d)
+
+    def test_files_without_the_label_still_open(self):
+        self.assertEqual(len(Diagram.from_dict({"nodes": [node("C1")]}).nodes), 1)
+
+    def test_other_files_and_newer_versions_are_refused_with_a_clear_message(self):
+        with self.assertRaisesRegex(DiagramError, "not a whiteboard diagram"):
+            Diagram.from_dict({"format": "something-else", "nodes": []})
+        for v in (2, "1", True, None):
+            with self.subTest(v=v), self.assertRaises(DiagramError):
+                Diagram.from_dict({"format": "whiteboard-diagram", "format_version": v, "nodes": []})
+
+
 class Migration(unittest.TestCase):
     OLD = {
         "nodes": [node("n1", colour="#ff0000"), node("n2", "controlled_process")],

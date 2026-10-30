@@ -10,7 +10,7 @@ from pathlib import Path
 from . import model
 
 STATIC = Path(__file__).parent / "static"
-PAGES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
+PAGES = {"/": "index.html", "/app.js": "app.js", "/route.js": "route.js", "/style.css": "style.css"}
 MAX_BODY = 5 * 1024 * 1024
 
 
@@ -58,7 +58,8 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             if not 0 <= length <= MAX_BODY:
                 return self._json(413, {"error": "diagram too large"})
             try:
-                diagram = model.Diagram.from_dict(json.loads(self.rfile.read(length)))
+                # Upgrading is harmless for current diagrams and lets an older saved file be opened.
+                diagram = model.Diagram.from_dict(model.migrate(json.loads(self.rfile.read(length))))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": "body is not valid JSON"})
             except model.DiagramError as exc:

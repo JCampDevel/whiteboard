@@ -48,7 +48,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
 
     def test_pages_are_served(self):
-        for path, marker in (("/", b"<svg"), ("/app.js", b"use strict"), ("/style.css", b"--bg")):
+        for path, marker in (("/", b"<svg"), ("/app.js", b"use strict"), ("/route.js", b"routeOrthogonal"), ("/style.css", b"--bg")):
             with self.subTest(path=path):
                 status, data = self.call("GET", path)
                 self.assertEqual(status, 200)
@@ -61,7 +61,7 @@ class ServerTests(unittest.TestCase):
 
     def test_new_diagram_is_empty(self):
         status, data = self.call("GET", "/api/diagram")
-        self.assertEqual((status, json.loads(data)), (200, {"nodes": [], "edges": []}))
+        self.assertEqual((status, json.loads(data)), (200, {"format": "whiteboard-diagram", "format_version": 1, "nodes": [], "edges": []}))
 
     def test_put_saves_and_get_returns_it(self):
         status, _ = self.call("PUT", "/api/diagram", GOOD)
@@ -70,6 +70,23 @@ class ServerTests(unittest.TestCase):
         got = json.loads(self.call("GET", "/api/diagram")[1])
         self.assertEqual([n["id"] for n in got["nodes"]], ["C1", "CA1", "PM1", "CP1"])
         self.assertEqual(got["edges"][1]["style"], "dashed")
+
+    def test_an_older_file_can_be_opened_through_the_page(self):
+        old = {"nodes": [{"id": "n1", "type": "controller", "x": 0, "y": 0, "w": 100, "h": 60},
+                         {"id": "n2", "type": "controlled_process", "x": 0, "y": 300, "w": 100, "h": 60}],
+               "edges": [{"id": "e1", "type": "control_action", "source": "n1", "target": "n2"}]}
+        self.assertEqual(self.call("PUT", "/api/diagram", old)[0], 200)
+        got = json.loads(self.call("GET", "/api/diagram")[1])
+        self.assertEqual(got["format"], "whiteboard-diagram")
+        self.assertEqual([(e["id"], e["source"], e["target"]) for e in got["edges"]], [("A1", "C1", "CP1")])
+
+    def test_opening_something_that_is_not_a_diagram_changes_nothing(self):
+        self.call("PUT", "/api/diagram", GOOD)
+        before = self.file.read_text()
+        status, data = self.call("PUT", "/api/diagram", {"format": "spreadsheet", "rows": []})
+        self.assertEqual(status, 400)
+        self.assertIn("not a whiteboard diagram", json.loads(data)["error"])
+        self.assertEqual(self.file.read_text(), before)
 
     def test_tables_come_from_the_saved_diagram(self):
         self.call("PUT", "/api/diagram", GOOD)

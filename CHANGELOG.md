@@ -4,6 +4,168 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.11.1, 2026-10-30: Getting started guide
+
+**Docs**
+- New `GETTING_STARTED.md`: what you need, cloning (SSH or HTTPS), starting the app, a first diagram in four steps, where work is saved, options, updating with `git pull`, running the tests, and fixes for common problems. Linked from the top of the README.
+- Checked against the app: the `--help` output and the "No module named whiteboard" message when started from the wrong folder are as the guide describes. Only Python 3.14 has actually been used; the guide says 3.8 or newer should work, which is from reading the code, not from trying it.
+
+No code changes.
+
+---
+
+## 0.11.0, 2026-10-30: Save as and Open, labelled JSON files
+
+**Added**
+- **Save as…** (Ctrl+S) saves a copy of the diagram to a JSON file: through the browser's save dialog in Chrome and Edge, otherwise as a download.
+- **Open…** (Ctrl+O) opens a diagram from a JSON file, replacing the one on screen after asking. The server checks it first; a file from an older version is upgraded, and anything that isn't a valid diagram is refused with the reason and changes nothing.
+- Saved files now begin with `"format": "whiteboard-diagram"` and `"format_version": 1`, so a file says what it is. Files without them (all earlier versions) still open. A file of a different format, or from a newer format version, is refused with a clear message.
+
+**Changed**
+- Saving through the page now also upgrades an older-version diagram (needed for Open…; no effect on current diagrams).
+- Requirement R16 rewritten (human-readable format, save a copy, open a file).
+
+**Unchanged**: autosave still writes to the file the app was started with, as indented JSON. Opening a file copies its diagram into that file; it does not switch which file is autosaved to.
+
+**Docs**: REQUIREMENTS.md (R16), DESIGN.md (file format, Save as / Open), README (new Saving and opening section).
+
+**Tests**: 74 (was 69): the saved file is labelled and indented one field per line and reads back the same; unlabelled files still open; other formats and newer versions are refused; an older file opened through the page is upgraded; opening a non-diagram leaves the working file untouched.
+
+**Not verified**: the two buttons and shortcuts are browser code and have not been run. Check Save as… in your browser (dialog or download), Open… with a saved copy, with an old diagram.json, and with some other JSON file (should be refused, diagram unchanged).
+
+---
+
+## 0.10.0, 2026-10-30: Arrows that work like other drawing tools
+
+Asked: the arrows aren't very usable; make them work like arrows in other drawing tools. Modelled on draw.io / Visio / Lucidchart.
+
+**Added**
+- **Connection points.** Hovering a box shows three points on each side; the one you would snap to fills in. **Drag out of a point to draw an arrow** without picking an arrow tool first (it draws the kind last picked in the toolbar, Control Action at first).
+- **Ends that follow their box** (floating, the default when you drop an end in the middle of a box). Such an end leaves from the side facing the other box, avoids a side whose way out is blocked, re-chooses as you move boxes, and shares a side evenly with other arrows, so a Control Action and Feedback between the same two boxes get separate lanes automatically.
+- **Segment handles.** A selected arrow has a square handle in the middle of each inner segment. Drag it sideways to move that part of the arrow (the segment stays straight and the rest re-routes round boxes). Double-click a moved one to release it.
+- **Reset arrow** (toolbar): both ends follow their boxes again and moved segments are released, for all selected arrows.
+- Double-click an end handle to make that end follow its box again.
+- Model: a pinned route point may carry an axis, `[x, y, 0|1]`.
+
+**Changed**
+- Dropping an end now works as in draw.io: on a connection point or within 8 px of the outline it is fixed there; elsewhere on the box it follows the box. (Before, every end was fixed wherever it was pressed or dropped.)
+- The 0.7 corner handles are replaced by segment handles. Older pinned corners still work and can be released by double-click or Reset.
+- Clicking or double-clicking a handle with a slight wobble (under 3 px) no longer pins anything.
+- Requirements R5 and R18 rewritten.
+
+**Not changed (on purpose)**
+- Arrows in existing diagrams keep their fixed ends, so nothing moves when you open a file. Select all and **Reset arrow** to switch them to following their boxes.
+
+**Docs**: REQUIREMENTS.md (R5, R18), DESIGN.md (arrow ends, moving segments, connection feedback), README.
+
+**Tests**: 69 (was 67): route points with an axis, bad axes rejected, floating ends allowed. **The new behaviour is all JavaScript and has no automated test** (no JavaScript engine here).
+
+**Not verified**
+- None of this has been run in a browser. It is the largest change to the arrows so far. Most worth checking: hover points appearing and not getting in the way of moving boxes (pressing exactly on a point now starts an arrow); which side floating ends choose, especially for arrows to the Control Algorithm / Process Model; dragging a segment; double-click on handles; and Reset on an old diagram.
+
+---
+
+## 0.9.0, 2026-10-30: Description for Control Actions, effect for Feedback
+
+**Added**
+- A **Description** field on every Control Action, and an **Effect** field on every Feedback (what that feedback would do to the entity it points at). Each has its own column in the arrow's table, right after Name, edited by double-clicking like a name, and can be ticked to show on the diagram (as a small grey line on the arrow; long text is cut to 70 characters there, the table has all of it).
+- Saved as `description` / `effect` on the arrow (up to 1000 characters). Existing diagrams open as before, with both empty. A Control Action cannot carry an effect and a Feedback cannot carry a description.
+- Requirement R20.
+
+**Changed**
+- Arrow table columns are now ID, Name, Description or Effect, Line, From, To, On diagram.
+
+**Docs**: REQUIREMENTS.md, DESIGN.md, README.
+
+**Tests**: 67 (was 62): defaults and round trip, each field only on its own arrow type, type and length limits, the new columns and rows, showing them on the diagram. No JavaScript test exists or can be run here.
+
+**Not verified**: not run in a browser. Check: double-clicking a description or effect, typing, Enter and Esc; ticking it to show on the arrow; that the cursor survives the table redraw after each save while typing a longer text.
+
+---
+
+## 0.8.0, 2026-10-30: Resizable table columns, double-click names, hide arrows
+
+**Added**
+- **Resizable table columns.** Drag the right edge of any column heading. Minimum width is about ten characters (plus the tick box and padding). Widths are remembered between visits.
+- **Hide and unhide arrows.** Each arrow has an **On diagram** tick in its table row (the heading tick does the whole table), plus **Hide arrow** in the toolbar for the selected arrows and **Unhide arrows (n)** which appears while any are hidden. A hidden arrow is not drawn and cannot be selected, but keeps its row and links. Saved with the diagram (`hidden`).
+
+**Changed**
+- **Names need a double-click to edit** in the tables: they show as plain text (or "(no name)") until double-clicked. Enter keeps the change and Esc restores the old name.
+- **The tick box in a Name cell is now to the left of the name**, not above it. Every cell is now tick-then-value.
+- Select all and box-select skip hidden arrows, so Delete can't remove something you can't see.
+- Requirements: R7 (double-click), R13 (resizable columns, tick position), new R19 (hiding arrows).
+
+**Fixed**
+- The tick box in the arrows' **Line** column was being wiped out when the cell's text was filled in (it never showed). Found while rewriting the cells.
+
+**Docs**: REQUIREMENTS.md, DESIGN.md (table layout, hiding), README.
+
+**Tests**: 62 (was 59): hidden defaults, round trip, must be true/false, hidden arrows still in tables. No JavaScript test exists or can be run here.
+
+**Not verified**
+- Nothing in the browser has been run. Check: dragging column edges (the minimum, and that the width survives a refresh), double-click to edit then Enter/Esc/click away, that the cursor survives the redraw after each save while typing, hide from the table and the toolbar and unhide, and that a hidden arrow's row still highlights and its links still appear on its boxes.
+- Hiding is per arrow, not "all arrows"; say if you wanted a single switch for every arrow.
+
+---
+
+## 0.7.0, 2026-10-30: Names live in the tables; drag arrow bends
+
+**Added**
+- **Edit an arrow's bends.** Select an arrow and drag a square handle on any of its bends to move it away from other arrows. This pins a waypoint (`via` in the saved file); the router still goes round boxes between the waypoints. Pinned bends are filled; double-click one to unpin it.
+- **Rename in the tables.** The Name cell of every row is a text box, next to its show/hide tick. The diagram updates as you type, and the cursor stays in the box when the table redraws after a save.
+- **Double-click an item on the diagram** to open the tables on its row with the cursor in its Name cell.
+
+**Removed**
+- The Name box and Show tick from the toolbar (added in 0.3.2 and 0.6.0). Names are edited, and shown or hidden, in the tables only. A newly drawn item no longer jumps the cursor into a name box; it starts named after its type.
+
+**Changed**
+- Saving now waits for the tables to refresh before it reports done, so something that saves then looks in the tables sees the new row.
+- Clicking the diagram releases any box being typed in, so Delete and the tool keys work straight away.
+- Requirements: R7 (names are edited from the table), R15 (toolbar sentence removed), R18 (bends can be dragged).
+
+**Docs**: REQUIREMENTS.md, DESIGN.md (names, waypoints), README.
+
+**Tests**: 59 (was 57): arrows' `via` defaults to empty, round-trips, and bad points are rejected. Still **no test of any JavaScript** (no JavaScript engine is available here; the sandbox refused installing one).
+
+**Not verified**
+- Nothing in the browser has been run. In particular the new things: typing in a table Name cell (the cursor must survive the redraw after each save), double-click to rename, and dragging bend handles (a new waypoint going in at the right place, several waypoints on one arrow, double-click to unpin). The router was also changed to work leg by leg through waypoints; with no waypoints it should behave as before, but that is untested too.
+
+---
+
+## 0.6.0, 2026-10-30: Arrows route around boxes; Show tick for names
+
+**Added**
+- **Routed arrows.** Arrows are drawn as right-angled connectors that bend to go round boxes instead of crossing them, like Visio. They leave and enter a box straight out of the side they are attached to. An arrow may cross only the boxes it is connected to, the Controller around an inner box it is connected to, and the inner boxes of a Controller it is connected to; every other box is avoided with a 10 px margin. Moving a box re-routes its arrows. New `static/route.js` (served at `/route.js`).
+- **Show tick beside the Name box** shows or hides the name on the diagram for the selected items. It does the same thing as the Name column in the tables (it was already possible per entity there; this puts it where you are working). It works on several selected items and is half-ticked for a mixed selection.
+- Requirement R18 (routed arrows); R7 and R15 reworded for the Show tick.
+
+**Changed**
+- An arrow's label now sits half way along its route.
+- Selecting, end handles, centring and box-select still use the arrow's two end points, so they behave as before.
+
+**Docs**: REQUIREMENTS.md (R7, R15, R18), DESIGN.md (routing), README.
+
+**Tests**: 57 pass. One check added that `/route.js` is served. **The routing itself has no automated test**: it is JavaScript and there is no JavaScript engine on this machine (I tried to install one in a throwaway virtual environment and the sandbox refused it).
+
+**Not verified**
+- None of this has been run, including the routing, which is new and fairly intricate. I walked a simple two-box case through by hand (it should give a Z-shape with the bend half way) but nothing more. Things most likely to need fixing: an arrow taking a strange detour, an arrow still crossing a box it should avoid, a slow drag when there are many boxes and arrows (routes are recomputed on every redraw), and labels landing on top of their own line.
+
+---
+
+## 0.5.1, 2026-10-30: New arrows start with a name
+
+**Changed**
+- New Control Actions and Feedback arrows are named "Control Action" / "Feedback" to begin with (they used to start blank, so with Name ticked, as it is by default, only the ID showed). Boxes already did this. Arrows already in a diagram keep whatever name they have, including none.
+- Name was, and remains, ticked by default for every entity (with ID); nothing about the tick boxes changed.
+
+**Docs**: README.
+
+**Tests**: none (browser-only change); 57 existing tests pass.
+
+**Not verified**: not run in a browser.
+
+---
+
 ## 0.5.0, 2026-10-30: Dark theme, colour chart, choose what the diagram shows
 
 **Added**

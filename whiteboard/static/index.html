@@ -24,7 +24,6 @@
     <button data-tool="feedback" class="tool" title="Drag from one rectangle to another (F)">Feedback</button>
   </div>
   <div class="group">
-    <label>Name <input type="text" id="name" maxlength="200" size="22" disabled placeholder="Select one item" autocomplete="off"></label>
     <div id="colour-group">
       <label for="colour-btn">Colour</label>
       <button id="colour-btn" aria-haspopup="true" aria-expanded="false" title="Colour chart: colours the selected items, or the next thing you draw"><span id="colour-swatch" class="swatch"></span></button>
@@ -38,8 +37,14 @@
     </label>
   </div>
   <div class="group">
+    <button id="save-file" title="Save a copy of the diagram to a JSON file (Ctrl+S)">Save as…</button>
+    <button id="open-file-btn" title="Open a diagram from a JSON file, replacing this one (Ctrl+O)">Open…</button>
+    <input type="file" id="open-file" accept=".json,application/json" hidden>
     <button id="theme" title="Switch between following your system, light and dark">Theme: Auto</button>
     <button id="home" title="Return the view to your diagram">Home</button>
+    <button id="reset-arrow" disabled title="Let the selected arrows choose their own sides and route again">Reset arrow</button>
+    <button id="hide-arrow" disabled title="Hide the selected arrows from the diagram. They stay in the tables.">Hide arrow</button>
+    <button id="unhide" hidden title="Draw every hidden arrow again">Unhide arrows</button>
     <button id="delete" disabled title="Delete the selected item (Delete)">Delete</button>
     <span id="status" role="status">Loading…</span>
   </div>
@@ -55,6 +60,7 @@
   </div>
   <div id="tables" hidden></div>
 </section>
+<script src="/route.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

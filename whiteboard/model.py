@@ -40,6 +40,9 @@ CHILD_TYPES = ("control_algorithm", "process_model")  # live inside a controller
 EDGE_TYPES = ("control_action", "feedback")
 LINE_STYLES = ("full", "dashed")
 
+FILE_FORMAT = "whiteboard-diagram"
+FILE_FORMAT_VERSION = 1  # raised only if a change means older versions of the app can't read the file
+
 MIN_NODE_SIZE = 40
 AUTO_COLOUR = "auto"  # drawn in the theme's text colour, so it shows on light and dark
 _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -47,7 +50,7 @@ _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _OUT_ACTIONS = ("outgoing", "Outgoing control actions")
 _IN_FEEDBACK = ("incoming", "Incoming feedback")
 _OTHER = ("other", "Other arrows")
-_ARROW_FIELDS = (("id", "ID"), ("name", "Name"), ("line", "Line"), ("source", "From"), ("target", "To"))
+_ARROW_ENDS = (("line", "Line"), ("source", "From"), ("target", "To"))
 # Each entity type's properties, in table-column order. These are the columns of its table and
 # also the properties that can be switched on to show on the diagram.
 FIELDS = {
@@ -61,9 +64,11 @@ FIELDS = {
     "controlled_process": (
         ("id", "ID"), ("name", "Name"), ("incoming", "Incoming control actions"),
         ("outgoing", "Outgoing feedback"), _OTHER),
-    "control_action": _ARROW_FIELDS,
-    "feedback": _ARROW_FIELDS,
+    # A Control Action says what it asks for; a Feedback says what effect it would have on the entity it points at.
+    "control_action": (("id", "ID"), ("name", "Name"), ("description", "Description")) + _ARROW_ENDS,
+    "feedback": (("id", "ID"), ("name", "Name"), ("effect", "Effect")) + _ARROW_ENDS,
 }
+LONG_TEXT = 1000  # longest description / effect
 DEFAULT_SHOWN = ("id", "name")
 
 
@@ -100,10 +105,10 @@ def _shown(value, type_: str) -> list[str]:
     return [k for k in keys if k in value]  # tidy: table order, no repeats
 
 
-def _text(value, what: str) -> str:
+def _text(value, what: str, limit: int = 200) -> str:
     if not isinstance(value, str):
         raise DiagramError(f"{what} must be text")
-    return value[:200]
+    return value[:limit]
 
 
 def _anchor(value, what: str) -> list[float] | None:
@@ -116,6 +121,39 @@ def _anchor(value, what: str) -> list[float] | None:
     if not (0 <= x <= 1 and 0 <= y <= 1):
         raise DiagramError(f"{what} must be inside the rectangle (0 to 1)")
     return [x, y]
+
+
+MAX_VIA = 50
+
+
+def _via(value) -> list[list[float]]:
+    """Points the user has dragged an arrow's route through, in order (empty: route it automatically)."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > MAX_VIA:
+        raise DiagramError(f"via must be a list of at most {MAX_VIA} points")
+    return [_route_point(pt) for pt in value]
+
+
+def _route_point(pt) -> list[float]:
+    """[x, y] (a pinned corner) or [x, y, axis]: a dragged segment the route runs straight through,
+    horizontally (axis 0) or vertically (axis 1)."""
+    if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
+        raise DiagramError("a route point must be [x, y] or [x, y, axis]")
+    point = [_number(v, "route point") for v in pt[:2]]
+    if len(pt) == 3:
+        if pt[2] not in (0, 1) or isinstance(pt[2], bool):
+            raise DiagramError("a route point's axis must be 0 (horizontal) or 1 (vertical)")
+        point.append(int(pt[2]))
+    return point
+
+
+def _hidden(value) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise DiagramError("hidden must be true or false")
+    return value
 
 
 def _unique_id(value, type_: str, what: str) -> str:
@@ -179,6 +217,10 @@ class Edge:
     source_anchor: list[float] | None = None
     target_anchor: list[float] | None = None
     shown: list[str] = field(default_factory=lambda: list(DEFAULT_SHOWN))
+    via: list[list[float]] = field(default_factory=list)  # waypoints the user has pinned the route through
+    hidden: bool = False  # not drawn on the diagram (still in the tables)
+    description: str = ""  # Control Actions only
+    effect: str = ""  # Feedback only: its effect on the entity it points at
 
     @classmethod
     def from_dict(cls, d: dict) -> "Edge":
@@ -191,6 +233,12 @@ class Edge:
         for end in ("source", "target"):
             if not isinstance(d.get(end), str) or not d[end]:
                 raise DiagramError(f"edge {end} must be an id")
+        description = _text(d.get("description", ""), "description", LONG_TEXT)
+        effect = _text(d.get("effect", ""), "effect", LONG_TEXT)
+        if description and d["type"] != "control_action":
+            raise DiagramError("only a Control Action has a description")
+        if effect and d["type"] != "feedback":
+            raise DiagramError("only a Feedback has an effect")
         return cls(
             id=_unique_id(d.get("id"), d["type"], "edge id"),
             type=d["type"],
@@ -202,6 +250,10 @@ class Edge:
             source_anchor=_anchor(d.get("source_anchor"), "arrow start point"),
             target_anchor=_anchor(d.get("target_anchor"), "arrow end point"),
             shown=_shown(d.get("shown"), d["type"]),
+            via=_via(d.get("via")),
+            hidden=_hidden(d.get("hidden")),
+            description=description,
+            effect=effect,
         )
 
 
@@ -214,6 +266,11 @@ class Diagram:
     def from_dict(cls, d: dict) -> "Diagram":
         if not isinstance(d, dict):
             raise DiagramError("a diagram must be an object")
+        if d.get("format", FILE_FORMAT) != FILE_FORMAT:
+            raise DiagramError(f"this is not a whiteboard diagram (format {d.get('format')!r})")
+        version = d.get("format_version", FILE_FORMAT_VERSION)
+        if isinstance(version, bool) or not isinstance(version, int) or version > FILE_FORMAT_VERSION:
+            raise DiagramError("this diagram was saved by a newer version of the app")
         raw_nodes, raw_edges = d.get("nodes", []), d.get("edges", [])
         if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
             raise DiagramError("nodes and edges must be lists")
@@ -245,7 +302,10 @@ class Diagram:
         return cls(nodes, edges)
 
     def to_dict(self) -> dict:
+        # The first two keys say what the file is, for anyone opening it in a text editor.
         return {
+            "format": FILE_FORMAT,
+            "format_version": FILE_FORMAT_VERSION,
             "nodes": [vars(n).copy() for n in self.nodes],
             "edges": [vars(e).copy() for e in self.edges],
         }
@@ -406,8 +466,9 @@ def tables(diagram: Diagram) -> list[dict]:
     result.append({"key": "controlled_process", "title": "Controlled Process", "columns": columns("controlled_process"), "rows": rows})
 
     for type_ in EDGE_TYPES:
+        extra = "description" if type_ == "control_action" else "effect"
         rows = [
-            {"id": e.id, "name": e.label, "line": e.style, "source": e.source, "target": e.target}
+            {"id": e.id, "name": e.label, extra: getattr(e, extra), "line": e.style, "source": e.source, "target": e.target}
             for e in edges if e.type == type_
         ]
         result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": columns(type_), "rows": rows})

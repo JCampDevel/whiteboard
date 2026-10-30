@@ -32,7 +32,7 @@ const DEFAULT_SIZE = { controller: { w: 360, h: 140 }, controlled_process: { w: 
 
 const $ = (id) => document.getElementById(id);
 const board = $("board"), scroller = $("scroller"), statusEl = $("status");
-const styleEl = $("style"), deleteBtn = $("delete"), nameEl = $("name");
+const styleEl = $("style"), deleteBtn = $("delete"), hideBtn = $("hide-arrow"), unhideBtn = $("unhide"), resetBtn = $("reset-arrow");
 const colourBtn = $("colour-btn"), swatchEl = $("colour-swatch"), paletteEl = $("palette"), themeBtn = $("theme");
 
 let diagram = { nodes: [], edges: [] };
@@ -42,6 +42,8 @@ let view = { x: 0, y: 0 };   // where the world origin sits on screen (panning)
 let drag = null;             // current mouse gesture
 let spaceDown = false;
 let saveTimer = null;
+let floating = {};           // arrow id -> {source, target}: where its free-floating ends sit this redraw
+let lastArrow = "control_action"; // the kind of arrow drawn by dragging out of a connection point
 let dirty = false;           // changes not yet saved
 let dockOpen = false;        // tables panel at the bottom: open or minimised
 let activeTab = "controller";
@@ -104,24 +106,140 @@ function snapAnchor(n, p) {
 }
 const anchorPoint = (n, a) => ({ x: n.x + a[0] * n.w, y: n.y + a[1] * n.h });
 
-// Older files have no anchors: start each arrow where the line between centres leaves the rectangle.
-function fillMissingAnchors() {
+// Where an arrow can be pinned to a box: three points on each side (a quarter, half and three quarters along).
+const CONNECT_POINTS = [];
+for (const t of [0.25, 0.5, 0.75]) CONNECT_POINTS.push([t, 0], [1, t], [t, 1], [0, t]);
+const SNAP = 12; // how close (px) the mouse must be to a connection point to snap to it
+
+// The connection point of box n within r px of p, if any.
+function nearPoint(n, p, r) {
+  let best = null, bestD = r;
+  for (const a of CONNECT_POINTS) {
+    const q = anchorPoint(n, a), d = Math.hypot(q.x - p.x, q.y - p.y);
+    if (d <= bestD) { best = a; bestD = d; }
+  }
+  return best && [...best];
+}
+
+// What attaching an arrow end at p on box n means, as in draw.io: on a connection point or within 8 px of the
+// outline, the end is fixed there; anywhere else on the box it floats (null) and picks the best side itself.
+function attachAt(n, p) {
+  const point = nearPoint(n, p, SNAP);
+  if (point) return point;
+  const edge = Math.min(p.x - n.x, n.x + n.w - p.x, p.y - n.y, n.y + n.h - p.y);
+  return edge < 8 ? snapAnchor(n, p) : null;
+}
+
+// The point on n's outline in the direction of p (where a floating end appears while drawing).
+function perimeterToward(n, p) {
+  const c = centre(n), len = Math.hypot(p.x - c.x, p.y - c.y);
+  if (len < 1) return c;
+  const d = { x: (p.x - c.x) / len, y: (p.y - c.y) / len }, t = exitDistance(n, c, d);
+  return { x: c.x + d.x * t, y: c.y + d.y * t };
+}
+
+// ---- floating ends ----
+// An end with no fixed point follows its box: it leaves from the side facing the other end (or the next best
+// side whose way out is clear), and ends sharing a side are spread evenly along it, ordered to avoid crossing.
+const sideAnchor = (side, t) => [[1, t], [t, 1], [0, t], [t, 0]][side]; // side = index into DIRS
+
+function facingSide(a, b) {
+  const right = b.x - (a.x + a.w), left = a.x - (b.x + b.w), down = b.y - (a.y + a.h), up = a.y - (b.y + b.h);
+  const across = Math.max(right, left), along = Math.max(down, up);
+  if (across < 0 && along < 0) { // overlapping, e.g. an inner box and its own Controller: go by the centres
+    const ca = centre(a), cb = centre(b);
+    if (Math.abs(cb.x - ca.x) >= Math.abs(cb.y - ca.y)) return cb.x >= ca.x ? 0 : 2;
+    return cb.y >= ca.y ? 1 : 3;
+  }
+  if (across >= along) return right >= left ? 0 : 2;
+  return down >= up ? 1 : 3;
+}
+
+function computeFloating() {
+  const out = {}, groups = new Map();
   for (const e of diagram.edges) {
     const a = nodeById(e.source), b = nodeById(e.target);
-    if (!a || !b) continue;
-    const ca = centre(a), cb = centre(b), len = Math.hypot(cb.x - ca.x, cb.y - ca.y) || 1;
-    const d = { x: (cb.x - ca.x) / len, y: (cb.y - ca.y) / len };
-    if (!e.source_anchor) e.source_anchor = snapAnchor(a, { x: ca.x + d.x * exitDistance(a, ca, d), y: ca.y + d.y * exitDistance(a, ca, d) });
-    if (!e.target_anchor) e.target_anchor = snapAnchor(b, { x: cb.x - d.x * exitDistance(b, cb, { x: -d.x, y: -d.y }), y: cb.y - d.y * exitDistance(b, cb, { x: -d.x, y: -d.y }) });
+    if (!a || !b || e.hidden) continue;
+    out[e.id] = {};
+    const obstacles = obstaclesFor(e);
+    for (const [end, n, other] of [["source", a, b], ["target", b, a]]) {
+      if (e[end + "_anchor"]) continue;
+      const first = facingSide(n, other), ca = centre(n), cb = centre(other);
+      const across = first % 2 === 0 ? (cb.y >= ca.y ? [1, 3] : [3, 1]) : (cb.x >= ca.x ? [0, 2] : [2, 0]);
+      const prefs = [first, ...across, (first + 2) % 4];
+      const side = prefs.find(sd => stubClear(anchorPoint(n, sideAnchor(sd, 0.5)), sd, obstacles)) ?? first;
+      const key = `${n.id}:${side}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ e, end, side, other });
+    }
   }
+  for (const group of groups.values()) {
+    const along = (x) => { const c = centre(x.other); return x.side % 2 === 0 ? c.y : c.x; };
+    group.sort((p, q) => along(p) - along(q) || (p.e.id < q.e.id ? -1 : p.e.id > q.e.id ? 1 : 0) || (p.end < q.end ? -1 : 1));
+    group.forEach((x, i) => { out[x.e.id][x.end] = sideAnchor(x.side, (i + 1) / (group.length + 1)); });
+  }
+  return out;
 }
+
+// Where an arrow's end is attached right now: its fixed point, or where it is floating to.
+const anchorOf = (e, end) => e[end + "_anchor"] || floating[e.id]?.[end] || [0.5, 0.5];
 
 function edgeEnds(e) {
   const a = nodeById(e.source), b = nodeById(e.target);
   if (!a || !b) return null;
-  const p1 = anchorPoint(a, e.source_anchor), p2 = anchorPoint(b, e.target_anchor);
+  const p1 = anchorPoint(a, anchorOf(e, "source")), p2 = anchorPoint(b, anchorOf(e, "target"));
   if (Math.hypot(p2.x - p1.x, p2.y - p1.y) < 2) return null;
   return { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+}
+
+// The boxes an arrow must keep clear of: all of them except the two it connects, the Controller around
+// an inner box it connects, and the inner boxes of a Controller it connects.
+function obstaclesFor(e) {
+  const related = (n) => new Set([n.id, n.parent, ...diagram.nodes.filter(k => k.parent === n.id).map(k => k.id)].filter(Boolean));
+  const a = nodeById(e.source), b = nodeById(e.target);
+  const skip = new Set([...related(a), ...related(b)]);
+  return diagram.nodes.filter(n => !skip.has(n.id));
+}
+
+// The right-angled route an arrow is drawn along, from its start to its end point.
+function edgePath(e) {
+  const a = nodeById(e.source), b = nodeById(e.target);
+  return routeOrthogonal(
+    anchorPoint(a, anchorOf(e, "source")), sideDir(anchorOf(e, "source")),
+    anchorPoint(b, anchorOf(e, "target")), sideDir(anchorOf(e, "target")),
+    obstaclesFor(e), e.via || [],
+  );
+}
+
+// The straight runs of an arrow's route that can be dragged sideways: all but the two at its ends.
+// Each says its axis (0: horizontal, so it moves up and down; 1: vertical), its middle, the index in
+// e.via of a point the user already pinned on it (or null), and where a new pinned point would go in e.via.
+function segmentRuns(path) {
+  const runs = [];
+  let start = 0;
+  for (let k = 1; k < path.length; k++) {
+    const flat = path[k].y === path[k - 1].y;
+    const next = k + 1 < path.length ? path[k + 1].y === path[k].y : null;
+    if (next !== flat) { runs.push({ from: start, to: k, axis: flat ? 0 : 1 }); start = k; }
+  }
+  return runs.filter(r => r.from > 0 && r.to < path.length - 1).map(r => {
+    let via = null;
+    for (let k = r.from + 1; k < r.to; k++) if (path[k].via !== undefined) via = path[k].via;
+    if (via === null) via = path[r.from].via ?? path[r.to].via ?? null; // an older pinned corner
+    const a = path[r.from], b = path[r.to];
+    return {
+      ...r, via, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      insertAt: path.slice(0, r.from + 1).filter(q => q.via !== undefined).length,
+    };
+  });
+}
+
+// Draw a box's connection points (in the overlay), with the one in `hot` filled.
+function drawPoints(n, hot) {
+  for (const a of CONNECT_POINTS) {
+    const q = anchorPoint(n, a), on = hot && hot[0] === a[0] && hot[1] === a[1];
+    el("circle", { class: "cpoint" + (on ? " hot" : ""), cx: q.x, cy: q.y, r: on ? 5 : 3.5 }, $("overlay"));
+  }
 }
 
 // The box under the mouse; an inner box wins over the Controller around it.
@@ -174,7 +292,8 @@ function applyView() {
 function extraLines(item) {
   const row = rowOf[item.id], titles = titleOf[item.type] || {};
   return shownOf(item).filter(k => k !== "id" && k !== "name").map(k => {
-    const v = row ? row[k] : undefined;
+    let v = k === "description" || k === "effect" ? item[k] : row ? row[k] : undefined; // typed text is read live
+    if (typeof v === "string" && v.length > 70) v = v.slice(0, 69) + "…"; // long text is cut on the diagram only
     return `${titles[k] || k}: ${(Array.isArray(v) ? v.join(", ") : v) || "—"}`;
   });
 }
@@ -210,25 +329,27 @@ function drawNode(n) {
 
 function render() {
   layoutChildren();
+  floating = computeFloating();
+  const paths = {}; // arrow id -> the route it was drawn along this time
   $("nodes").replaceChildren();
   $("edges").replaceChildren();
   $("handles").replaceChildren();
 
   for (const e of diagram.edges) {
-    const ends = edgeEnds(e);
+    const ends = !e.hidden && edgeEnds(e);
     if (!ends) continue;
     const g = el("g", { class: "edge" + (selection.has(e.id) ? " selected" : ""), "data-id": e.id }, $("edges"));
-    const attrs = { x1: ends.x1, y1: ends.y1, x2: ends.x2, y2: ends.y2 };
-    el("line", { ...attrs, class: "edge-hit" }, g);
-    el("line", {
-      ...attrs, class: "edge-line", style: `stroke:${paint(e.colour)}`, "stroke-width": 2.5,
-      "stroke-dasharray": e.style === "dashed" ? "9 6" : "none", "marker-end": marker(e.colour),
+    const path = (paths[e.id] = edgePath(e)), points = path.map(p => `${p.x},${p.y}`).join(" "), mid = pathMiddle(path);
+    el("polyline", { points, class: "edge-hit" }, g);
+    el("polyline", {
+      points, fill: "none", class: "edge-line", style: `stroke:${paint(e.colour)}`, "stroke-width": 2.5,
+      "stroke-linejoin": "round", "stroke-dasharray": e.style === "dashed" ? "9 6" : "none", "marker-end": marker(e.colour),
     }, g);
     const shown = shownOf(e), first = [shown.includes("id") ? e.id : "", shown.includes("name") ? e.label : ""].filter(Boolean).join(" ");
     const lines = (first ? [{ text: first, cls: "" }] : []).concat(extraLines(e).map(text => ({ text, cls: " extra" })));
-    const top = (ends.y1 + ends.y2) / 2 - 6 - (lines.length - 1) * 14;
+    const top = mid.y - 6 - (lines.length - 1) * 14;
     lines.forEach((ln, i) => {
-      el("text", { class: "edge-label" + ln.cls, x: (ends.x1 + ends.x2) / 2, y: top + i * 14 }, g).textContent = ln.text;
+      el("text", { class: "edge-label" + ln.cls, x: mid.x, y: top + i * 14 }, g).textContent = ln.text;
     });
   }
 
@@ -244,13 +365,26 @@ function render() {
     el("rect", { class: "handle", x: only.x + only.w - 6, y: only.y + only.h - 6, width: 12, height: 12, rx: 2 }, $("handles"));
   }
   for (const id of selection) {
-    const e = edgeById(id), ends = e && edgeEnds(e);
+    const e = edgeById(id), ends = e && !e.hidden && edgeEnds(e);
     if (!ends) continue;
     for (const [end, x, y] of [["source", ends.x1, ends.y1], ["target", ends.x2, ends.y2]]) {
       el("circle", { class: "anchor-handle", cx: x, cy: y, r: 7, "data-end": end, "data-edge": e.id }, $("handles"));
     }
+    // A handle in the middle of each inner segment: drag it sideways to move that part of the arrow away from
+    // other arrows. A filled one is a segment you have moved; double-click it to let it route itself again.
+    segmentRuns(paths[e.id] || []).forEach((run, r) => {
+      el("rect", {
+        class: "seg-handle " + (run.axis === 0 ? "h" : "v") + (run.via !== null ? " pinned" : ""),
+        x: run.mid.x - 5, y: run.mid.y - 5, width: 10, height: 10, rx: 2, "data-edge": e.id, "data-run": r,
+      }, $("handles"));
+    });
   }
   deleteBtn.disabled = selection.size === 0;
+  const hiddenCount = diagram.edges.filter(e => e.hidden).length;
+  hideBtn.disabled = ![...selection].some(id => edgeById(id) && !edgeById(id).hidden);
+  unhideBtn.hidden = !hiddenCount;
+  unhideBtn.textContent = `Unhide arrows (${hiddenCount})`;
+  resetBtn.disabled = ![...selection].map(edgeById).some(e => e && (e.source_anchor || e.target_anchor || (e.via && e.via.length)));
 }
 
 function setSelection(ids) {
@@ -258,20 +392,9 @@ function setSelection(ids) {
   const item = selection.size === 1 ? itemById([...selection][0]) : null;
   if (item && item.style) styleEl.value = item.style;
   refreshSwatch();
-  // The Name box edits the one selected item; with none or several selected it is off.
-  nameEl.disabled = !item;
-  nameEl.value = item ? item.label : "";
   render();
   if (dockOpen) showSelectionInTables();
 }
-
-// Type a name for the selected item; the diagram updates as you type.
-nameEl.addEventListener("input", () => {
-  const item = selection.size === 1 ? itemById([...selection][0]) : null;
-  if (item) { item.label = nameEl.value.slice(0, 200); render(); changed(); }
-});
-nameEl.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === "Escape") nameEl.blur(); });
-function editName() { if (!nameEl.disabled) { nameEl.focus(); nameEl.select(); } }
 function toggle(id) {
   const s = new Set(selection);
   s.has(id) ? s.delete(id) : s.add(id);
@@ -291,7 +414,7 @@ async function save() {
     const r = await fetch("/api/diagram", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(diagram),
     });
-    if (r.ok) { dirty = false; setStatus("Saved"); loadTables(); }
+    if (r.ok) { dirty = false; setStatus("Saved"); await loadTables(); }
     else setStatus("Not saved: " + ((await r.json()).error || r.status));
   } catch { setStatus("Not saved: server unreachable"); }
 }
@@ -302,7 +425,6 @@ async function load() {
     if (!r.ok) throw new Error(data.error);
     diagram = data;
     layoutChildren();
-    fillMissingAnchors();
     setStatus(diagram.nodes.length ? "Loaded" : "New diagram");
   } catch (err) { setStatus("Could not load: " + err.message); }
   goHome();
@@ -325,6 +447,7 @@ $("home").addEventListener("click", goHome);
 // ---------- tools ----------
 function setTool(t) {
   tool = t;
+  if (EDGE_TOOLS.includes(t)) lastArrow = t;
   refreshSwatch();
   document.querySelectorAll(".tool").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
   updateCursor();
@@ -412,13 +535,23 @@ function deleteSelected() {
   changed();
 }
 deleteBtn.addEventListener("click", deleteSelected);
+hideBtn.addEventListener("click", () => setHidden([...selection].map(edgeById).filter(Boolean), true));
+unhideBtn.addEventListener("click", () => setHidden(diagram.edges.filter(e => e.hidden), false));
+// Back to fully automatic: both ends float and the route finds its own way.
+resetBtn.addEventListener("click", () => {
+  for (const e of [...selection].map(edgeById).filter(Boolean)) { e.source_anchor = e.target_anchor = null; e.via = []; }
+  render();
+  changed();
+});
 
 const KEYS = { s: "select", h: "pan", c: "controller", p: "controlled_process", a: "control_action", f: "feedback" };
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !paletteEl.hidden) { closePalette(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "s") { ev.preventDefault(); saveToFile(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "o") { ev.preventDefault(); fileInput.click(); return; }
   if (ev.target.matches("input, select")) return;
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") {
-    setSelection([...diagram.nodes, ...diagram.edges].map(i => i.id));
+    setSelection([...diagram.nodes, ...diagram.edges.filter(e => !e.hidden)].map(i => i.id));
     return ev.preventDefault();
   }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -440,7 +573,8 @@ board.addEventListener("wheel", (ev) => {
 // ---------- mouse ----------
 board.addEventListener("mousedown", (ev) => {
   if (ev.button !== 0 && ev.button !== 1) return;
-  if (document.activeElement === nameEl) nameEl.blur(); // we cancel the default below, so release the box ourselves
+  // We cancel the default below, so release any box being typed in (a name in the tables) ourselves.
+  if (document.activeElement && document.activeElement.matches("input, select")) document.activeElement.blur();
   const p = pointer(ev), n = hit(p), edgeEl = ev.target.closest(".edge");
   drag = null;
 
@@ -450,7 +584,14 @@ board.addEventListener("mousedown", (ev) => {
     if (ev.target.classList.contains("handle")) {
       drag = { mode: "resize", node: nodeById([...selection][0]), moved: false };
     } else if (ev.target.classList.contains("anchor-handle")) {
-      drag = { mode: "anchor", edge: edgeById(ev.target.dataset.edge), end: ev.target.dataset.end, moved: false };
+      drag = { mode: "anchor", edge: edgeById(ev.target.dataset.edge), end: ev.target.dataset.end, moved: false, from: p };
+    } else if (ev.target.classList.contains("seg-handle")) {
+      // Grab a segment. If it hasn't been moved before, a pinned point is added when you start dragging.
+      const e = edgeById(ev.target.dataset.edge), run = segmentRuns(edgePath(e))[Number(ev.target.dataset.run)];
+      if (run) drag = { mode: "segment", edge: e, axis: run.axis, mid: run.mid, at: run.via ?? run.insertAt, fresh: run.via === null, moved: false, from: p };
+    } else if (n && !isModifier(ev) && nearPoint(n, p, 7)) {
+      // Pressing on a box's connection point draws an arrow out of it (the kind last picked in the toolbar).
+      drag = { mode: "connect", from: n, anchor: nearPoint(n, p, 7), type: lastArrow, moved: false };
     } else if (n) {
       let collapse = false;
       if (isModifier(ev)) toggle(n.id);
@@ -471,7 +612,7 @@ board.addEventListener("mousedown", (ev) => {
         .find(([, x, y]) => Math.hypot(p.x - x, p.y - y) < 12);
       if (nearEnd) {
         setSelection([e.id]);
-        drag = { mode: "anchor", edge: e, end: nearEnd[0], moved: false };
+        drag = { mode: "anchor", edge: e, end: nearEnd[0], moved: false, from: p };
       } else isModifier(ev) ? toggle(e.id) : setSelection([e.id]);
     } else {
       const additive = isModifier(ev);
@@ -481,7 +622,7 @@ board.addEventListener("mousedown", (ev) => {
   } else if (NODE_TOOLS.includes(tool)) {
     drag = { mode: "create", start: p };
   } else if (EDGE_TOOLS.includes(tool) && n) {
-    drag = { mode: "connect", from: n, anchor: snapAnchor(n, p) };
+    drag = { mode: "connect", from: n, anchor: attachAt(n, p), type: tool, moved: false };
   }
   if (drag) { ev.preventDefault(); updateCursor(); }
 });
@@ -494,14 +635,25 @@ function marqueeHits(a, b) {
     if (n.x <= x2 && n.x + n.w >= x1 && n.y <= y2 && n.y + n.h >= y1) ids.push(n.id);
   }
   for (const e of diagram.edges) {
-    const ends = edgeEnds(e);
+    const ends = !e.hidden && edgeEnds(e);
     if (ends && inside(ends.x1, ends.y1) && inside(ends.x2, ends.y2)) ids.push(e.id);
   }
   return ids;
 }
 
+// With no button held, show the connection points of the box under the mouse (select and arrow tools).
+function showHoverPoints(ev) {
+  const ov = $("overlay");
+  const live = board.contains(ev.target) && !spaceDown && (tool === "select" || EDGE_TOOLS.includes(tool));
+  const n = live ? hit(pointer(ev)) : null;
+  const hot = n && nearPoint(n, pointer(ev), tool === "select" ? 7 : SNAP);
+  if (ov.childNodes.length || n) ov.replaceChildren();
+  if (n) drawPoints(n, hot);
+  board.classList.toggle("on-point", Boolean(hot));
+}
+
 window.addEventListener("mousemove", (ev) => {
-  if (!drag) return;
+  if (!drag) { showHoverPoints(ev); return; }
   const p = pointer(ev), ov = $("overlay");
   if (drag.mode === "pan") {
     view.x = drag.vx + ev.clientX - drag.sx;
@@ -518,19 +670,32 @@ window.addEventListener("mousemove", (ev) => {
     drag.node.h = Math.max(MIN_SIZE, p.y - drag.node.y);
     drag.moved = true;
     render();
+  } else if ((drag.mode === "anchor" || drag.mode === "segment") && !drag.moved && Math.hypot(p.x - drag.from.x, p.y - drag.from.y) < 3) {
+    return; // a click (or a double-click) on a handle must not pin anything
   } else if (drag.mode === "anchor") {
     // Slide the end along its rectangle's border, or drop it on another rectangle to re-attach it.
     const e = drag.edge, otherId = drag.end === "source" ? e.target : e.source;
     let n = hit(p);
     if (!n || n.id === otherId) n = nodeById(e[drag.end]);
     e[drag.end] = n.id;
-    e[drag.end + "_anchor"] = snapAnchor(n, p);
+    e[drag.end + "_anchor"] = attachAt(n, p); // a point, the outline, or (inside the box) floating
     drag.moved = true;
     drag.hover = n.id;
     render();
     ov.replaceChildren();
-    const a = anchorPoint(n, e[drag.end + "_anchor"]);
+    drawPoints(n, e[drag.end + "_anchor"]);
+    const a = anchorPoint(n, anchorOf(e, drag.end));
     el("circle", { class: "attach-dot", cx: a.x, cy: a.y, r: 5 }, ov);
+  } else if (drag.mode === "segment") {
+    // The segment slides sideways only: a horizontal one up and down, a vertical one left and right.
+    const e = drag.edge, pt = drag.axis === 0 ? [drag.mid.x, p.y, 0] : [p.x, drag.mid.y, 1];
+    if (!drag.moved) {
+      e.via = e.via || [];
+      if (drag.fresh) e.via.splice(drag.at, 0, pt);
+    }
+    e.via[drag.at] = pt;
+    drag.moved = true;
+    render();
   } else if (drag.mode === "marquee") {
     ov.replaceChildren();
     el("rect", {
@@ -546,19 +711,23 @@ window.addEventListener("mousemove", (ev) => {
       fill: "none", style: `stroke:${paint(pen[tool])}`, "stroke-dasharray": "4 4", "stroke-width": 2,
     }, ov);
   } else if (drag.mode === "connect") {
-    const over = hit(p), s = anchorPoint(drag.from, drag.anchor);
-    const target = over && over !== drag.from ? over : null;
+    const over = hit(p), target = over && over !== drag.from ? over : null;
+    const s = drag.anchor ? anchorPoint(drag.from, drag.anchor) : perimeterToward(drag.from, p);
+    drag.moved = true;
     drag.hover = target ? target.id : null;
     render();
     ov.replaceChildren();
+    const colour = paint(pen[drag.type]);
     el("line", {
-      x1: s.x, y1: s.y, x2: p.x, y2: p.y, style: `stroke:${paint(pen[tool])}`, "stroke-width": 2.5,
+      x1: s.x, y1: s.y, x2: p.x, y2: p.y, style: `stroke:${colour}`, "stroke-width": 2.5,
       "stroke-dasharray": styleEl.value === "dashed" ? "9 6" : "none",
     }, ov);
-    el("circle", { cx: s.x, cy: s.y, r: 5, style: `fill:${paint(pen[tool])}` }, ov);
-    if (target) {
-      const a = anchorPoint(target, snapAnchor(target, p));
-      el("circle", { class: "attach-dot", cx: a.x, cy: a.y, r: 5 }, ov);
+    el("circle", { cx: s.x, cy: s.y, r: 5, style: `fill:${colour}` }, ov);
+    if (target) { // its points, the one you would snap to filled, and a dot where the end would land
+      const a = attachAt(target, p);
+      drawPoints(target, a);
+      const at = a ? anchorPoint(target, a) : perimeterToward(target, s);
+      el("circle", { class: "attach-dot", cx: at.x, cy: at.y, r: 5 }, ov);
     }
   }
 });
@@ -570,7 +739,7 @@ window.addEventListener("mouseup", (ev) => {
   $("overlay").replaceChildren();
   updateCursor();
 
-  if (d.mode === "move" || d.mode === "resize" || d.mode === "anchor") {
+  if (d.mode === "move" || d.mode === "resize" || d.mode === "anchor" || d.mode === "segment") {
     if (d.moved) changed();
     else if (d.collapse) setSelection([d.id]);
     render(); // clears the connect highlight
@@ -597,28 +766,104 @@ window.addEventListener("mouseup", (ev) => {
     setTool("select");
     setSelection([n.id]);
     changed();
-    editName();
   } else if (d.mode === "connect") {
     const to = hit(p);
     if (!to || to === d.from) {
-      setStatus("Drop the arrow on a different rectangle");
+      if (d.moved) setStatus("Drop the arrow on a different box");
       render();
       return;
     }
     const e = {
-      id: newId(tool), type: tool, source: d.from.id, target: to.id,
-      style: styleEl.value, label: "", colour: pen[tool], shown: [...DEFAULT_SHOWN],
-      source_anchor: d.anchor, target_anchor: snapAnchor(to, p),
+      id: newId(d.type), type: d.type, source: d.from.id, target: to.id,
+      style: styleEl.value, label: TYPE_NAMES[d.type], colour: pen[d.type], shown: [...DEFAULT_SHOWN],
+      source_anchor: d.anchor, target_anchor: attachAt(to, p), via: [],
     };
     diagram.edges.push(e);
     setSelection([e.id]);
     changed();
-    editName();
   }
 });
 
-// Double-click an item to rename it.
-board.addEventListener("dblclick", (ev) => { if (tool === "select") editName(); });
+// Double-click: a moved segment's handle lets it route itself again; an arrow's end handle lets that end
+// float again; anything else opens its table with the name ready to edit.
+board.addEventListener("dblclick", (ev) => {
+  if (tool !== "select") return;
+  if (ev.target.classList.contains("seg-handle")) {
+    const e = edgeById(ev.target.dataset.edge), run = segmentRuns(edgePath(e))[Number(ev.target.dataset.run)];
+    if (run && run.via !== null) { e.via.splice(run.via, 1); render(); changed(); }
+    return;
+  }
+  if (ev.target.classList.contains("anchor-handle")) {
+    const e = edgeById(ev.target.dataset.edge);
+    if (e) { e[ev.target.dataset.end + "_anchor"] = null; render(); changed(); }
+    return;
+  }
+  const n = hit(pointer(ev)), edgeEl = ev.target.closest(".edge");
+  const id = n ? n.id : edgeEl ? edgeEl.dataset.id : null;
+  if (id) editNameInTable(id);
+});
+
+// ---------- save as / open a file ----------
+// The diagram always autosaves to the file the app was started with. These save a copy anywhere you like,
+// and open another file in its place. Files are indented JSON, readable and editable in any text editor.
+const fileInput = $("open-file");
+$("save-file").addEventListener("click", () => saveToFile());
+$("open-file-btn").addEventListener("click", () => fileInput.click());
+
+async function saveToFile() {
+  clearTimeout(saveTimer);
+  if (dirty) await save();
+  let text;
+  try { // the server's copy: checked, and in the saved format
+    const r = await fetch("/api/diagram");
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+    text = JSON.stringify(data, null, 2) + "\n";
+  } catch (err) { setStatus("Could not save a copy: " + err.message); return; }
+  const name = `diagram-${new Date().toISOString().slice(0, 10)}.json`;
+  if (window.showSaveFilePicker) { // browsers that let you choose where (Chrome, Edge)
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: name, types: [{ description: "Whiteboard diagram", accept: { "application/json": [".json"] } }],
+      });
+      const out = await handle.createWritable();
+      await out.write(text);
+      await out.close();
+      setStatus(`Saved a copy as ${handle.name}`);
+    } catch (err) { if (err.name !== "AbortError") setStatus("Could not save a copy: " + err.message); }
+    return;
+  }
+  const a = document.createElement("a"); // other browsers: an ordinary download
+  a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(`Saved a copy as ${name} (in your downloads)`);
+}
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  fileInput.value = ""; // so choosing the same file again still counts
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { setStatus(`${file.name} is not a JSON file`); return; }
+  if (diagram.nodes.length &&
+      !confirm(`Open ${file.name}?\n\nIt replaces the diagram on screen. Use "Save as…" first if you want to keep this one.`)) return;
+  clearTimeout(saveTimer);
+  try { // the server checks it (and upgrades a file from an older version) before anything is replaced
+    const r = await fetch("/api/diagram", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+    });
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+  } catch (err) { setStatus(`Could not open ${file.name}: ${err.message}`); return; }
+  dirty = false;
+  editing = null;
+  selection = new Set();
+  await load();
+  setStatus(`Opened ${file.name}`);
+});
 
 // ---------- tables ----------
 // A panel under the diagram, one tab per entity type. Selecting something on the diagram
@@ -690,6 +935,7 @@ function highlightRows() {
 function goTo(id) {
   const item = itemById(id);
   if (!item) return;
+  if (item.hidden) setStatus(`${id} is hidden: tick "On diagram" in its table to draw it`);
   const ends = item.w ? null : edgeEnds(item);
   const c = item.w ? centre(item) : ends && { x: (ends.x1 + ends.x2) / 2, y: (ends.y1 + ends.y2) / 2 };
   if (c) { view = { x: scroller.clientWidth / 2 - c.x, y: scroller.clientHeight / 2 - c.y }; applyView(); }
@@ -703,21 +949,43 @@ const html = (tag, text, cls) => {
   return e;
 };
 
+// Column widths the user has dragged, remembered between visits ("tab:column" -> pixels).
+const colWidths = (() => {
+  try { return JSON.parse(localStorage.getItem("whiteboard-col-widths")) || {}; } catch { return {}; }
+})();
+let minColPx = 0;
+// No column can be narrower than 10 characters of text plus its tick box and padding.
+function minCol() {
+  if (!minColPx) {
+    const probe = html("span");
+    probe.style.cssText = "position:absolute;visibility:hidden;width:10ch";
+    tablesEl.append(probe);
+    const w = probe.offsetWidth;
+    probe.remove();
+    if (w) minColPx = w + 50;
+  }
+  return minColPx || 130;
+}
+const defaultColWidth = (key) => (key === "description" || key === "effect" ? 300 : key === "name" ? 240 : key === "id" || key === "drawn" ? 110 : 190);
+
+let editing = null;        // "id:property" of the table cell open for typing (a name, description or effect)
+let rebuilding = false;    // true while the table is being redrawn, so a vanishing text box isn't treated as "finished"
+
 function renderDock() {
   const idLink = (id) => {
     const b = html("button", id, "link");
     b.addEventListener("click", () => goTo(id));
     return b;
   };
-  // Text cells (Name, Line) are shown as typed; everything else holds ids, possibly with a note like "(internal)".
-  const fill = (td, key, value) => {
-    if (key === "name" || key === "line") { td.textContent = value; return; }
+  // Cells other than the name hold ids (possibly with a note like "(internal)") or plain text (the line style).
+  const fill = (cell, key, value) => {
+    if (key === "line") { cell.append(String(value ?? "")); return; }
     const parts = Array.isArray(value) ? value : value ? [value] : [];
     parts.forEach((part, i) => {
-      if (i) td.append(", ");
+      if (i) cell.append(", ");
       const [id, ...note] = part.split(" ");
-      td.append(idLink(id));
-      if (note.length) td.append(" " + note.join(" "));
+      cell.append(idLink(id));
+      if (note.length) cell.append(" " + note.join(" "));
     });
   };
 
@@ -732,56 +1000,172 @@ function renderDock() {
   const t = tableData.find(x => x.key === activeTab) || tableData[0];
   if (!t) return;
   const keepScroll = lastTab === t.key ? tablesEl.scrollTop : 0; // a refresh must not jump back to the top
+  const typing = document.activeElement && tablesEl.contains(document.activeElement) && document.activeElement.dataset.edit
+    ? { from: document.activeElement.selectionStart, to: document.activeElement.selectionEnd }
+    : null; // a name being typed must keep the cursor when the table redraws after a save
   lastTab = t.key;
+  rebuilding = true;
   tablesEl.replaceChildren(html("h2", t.title));
+  rebuilding = false;
   if (!t.rows.length) {
     tablesEl.append(html("p", `No ${t.title} drawn yet.`, "hint"));
     return;
   }
-  tablesEl.append(html("p", "Tick a box to show that property of that item on the diagram.", "hint"));
+  tablesEl.append(html("p", "Double-click a name, description or effect to edit it. Tick a box to show that property of that item on the diagram. Drag the right edge of a heading to resize the column.", "hint"));
 
   const items = t.rows.map(r => itemById(r.id)).filter(Boolean);
+  // Arrows get one more column: whether the arrow is drawn on the diagram at all.
+  const arrows = t.key === "control_action" || t.key === "feedback";
+  const specs = t.columns.map(c => ({ ...c, kind: "property" })).concat(arrows ? [{ key: "drawn", title: "On diagram", kind: "drawn" }] : []);
+
   const headerTicks = [];
-  const syncHeaderTicks = () => headerTicks.forEach(({ cb, key }) => {
-    const on = items.filter(i => shownOf(i).includes(key)).length;
+  const syncHeaderTicks = () => headerTicks.forEach(({ cb, spec }) => {
+    const on = items.filter(i => (spec.kind === "drawn" ? !i.hidden : shownOf(i).includes(spec.key))).length;
     cb.checked = on === items.length;
     cb.indeterminate = on > 0 && on < items.length;
   });
 
-  const wrap = html("div", undefined, "table-wrap"), table = html("table"), thead = html("thead"), head = html("tr");
-  t.columns.forEach(c => {
+  const wrap = html("div", undefined, "table-wrap"), table = html("table"), colgroup = html("colgroup");
+  const thead = html("thead"), head = html("tr");
+  const cols = specs.map(spec => {
+    const col = html("col");
+    col.style.width = Math.max(minCol(), colWidths[`${t.key}:${spec.key}`] || defaultColWidth(spec.key)) + "px";
+    colgroup.append(col);
+    return col;
+  });
+  const fitTable = () => { table.style.width = cols.reduce((sum, col) => sum + parseFloat(col.style.width), 0) + "px"; };
+
+  specs.forEach((spec, k) => {
     // The header box ticks or clears the whole column.
-    const th = html("th"), label = html("label"), cb = tickBox(`Show ${c.title} for every ${t.title} on the diagram`);
-    cb.addEventListener("change", () => { setShown(items, c.key, cb.checked); renderDock(); });
-    headerTicks.push({ cb, key: c.key });
-    label.append(cb, c.title);
-    th.append(label);
+    const th = html("th"), label = html("label");
+    const cb = tickBox(spec.kind === "drawn" ? `Draw every ${t.title} on the diagram` : `Show ${spec.title} for every ${t.title} on the diagram`);
+    cb.addEventListener("change", () => {
+      if (spec.kind === "drawn") setHidden(items, !cb.checked);
+      else setShown(items, spec.key, cb.checked);
+      renderDock();
+    });
+    headerTicks.push({ cb, spec });
+    label.append(cb, html("span", spec.title));
+    const grip = html("div", undefined, "col-grip");
+    grip.title = "Drag to resize";
+    grip.addEventListener("mousedown", (ev) => {
+      const startX = ev.clientX, startW = parseFloat(cols[k].style.width);
+      const move = (e) => {
+        const w = Math.max(minCol(), startW + e.clientX - startX);
+        cols[k].style.width = w + "px";
+        colWidths[`${t.key}:${spec.key}`] = w;
+        fitTable();
+      };
+      const up = () => {
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        try { localStorage.setItem("whiteboard-col-widths", JSON.stringify(colWidths)); } catch {}
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+      ev.preventDefault();
+      ev.stopPropagation();
+    });
+    th.append(label, grip);
     head.append(th);
   });
   thead.append(head);
+
   const body = html("tbody");
   for (const row of t.rows) {
     const tr = html("tr"), item = itemById(row.id);
     tr.dataset.id = row.id;
-    t.columns.forEach(c => {
-      const td = html("td");
-      if (item) {
-        const cb = tickBox(`Show ${c.title} of ${row.id} on the diagram`);
-        cb.checked = shownOf(item).includes(c.key);
-        cb.addEventListener("change", () => { setShown([item], c.key, cb.checked); syncHeaderTicks(); });
-        td.append(cb);
+    specs.forEach(spec => {
+      const td = html("td"), cell = html("div", undefined, "cell"); // tick box on the left, value after it
+      td.append(cell);
+      if (item && spec.kind === "drawn") {
+        const cb = tickBox(`Draw ${row.id} on the diagram`);
+        cb.checked = !item.hidden;
+        cb.addEventListener("change", () => { setHidden([item], !cb.checked); syncHeaderTicks(); });
+        cell.append(cb);
+      } else if (item) {
+        const cb = tickBox(`Show ${spec.title} of ${row.id} on the diagram`);
+        cb.checked = shownOf(item).includes(spec.key);
+        cb.addEventListener("change", () => { setShown([item], spec.key, cb.checked); syncHeaderTicks(); });
+        cell.append(cb);
       }
-      fill(td, c.key, row[c.key]);
+      if (spec.kind === "property") {
+        if (TEXT_KEYS.includes(spec.key) && item) cell.append(textCell(item, spec.key));
+        else if (TEXT_KEYS.includes(spec.key)) cell.append(String(row[spec.key] ?? ""));
+        else fill(cell, spec.key, row[spec.key]);
+      }
       tr.append(td);
     });
     body.append(tr);
   }
-  table.append(thead, body);
+  table.append(colgroup, thead, body);
+  fitTable();
   wrap.append(table);
   tablesEl.append(wrap);
   syncHeaderTicks();
   tablesEl.scrollTop = keepScroll;
   highlightRows();
+
+  const open = editing && tablesEl.querySelector(`input[data-edit="${editing}"]`);
+  if (open && typing) { open.focus(); open.setSelectionRange(typing.from, typing.to); }
+  else if (!open) editing = null; // the cell being edited is not in this table any more
+}
+
+// Text a person types, in the tables: every entity's name, a Control Action's description, a Feedback's effect.
+const TEXT_KEYS = ["name", "description", "effect"];
+const TEXT_LIMIT = { name: 200, description: 1000, effect: 1000 };
+const TEXT_EMPTY = { name: "(no name)", description: "(no description)", effect: "(no effect)" };
+const textOf = (item, key) => (key === "name" ? item.label : item[key]) || "";
+function setText(item, key, value) { if (key === "name") item.label = value; else item[key] = value; }
+
+// It is plain text until you double-click it; then it is a text box. (So a stray click can't change it.)
+function textCell(item, key) {
+  if (editing === `${item.id}:${key}`) return textInput(item, key);
+  const text = textOf(item, key);
+  const span = html("span", text || TEXT_EMPTY[key], "name-text" + (text ? "" : " empty"));
+  span.title = text ? `${text}\n(double-click to edit)` : "Double-click to edit";
+  span.addEventListener("dblclick", () => startEditing(item.id, key));
+  return span;
+}
+
+function startEditing(id, key = "name") {
+  editing = `${id}:${key}`;
+  renderDock();
+  const box = tablesEl.querySelector(`input[data-edit="${editing}"]`);
+  if (box) { box.focus(); box.select(); }
+}
+
+// Typing changes the diagram at once. Enter keeps it, Esc puts the old text back.
+function textInput(item, key) {
+  const box = document.createElement("input");
+  const original = textOf(item, key), mine = `${item.id}:${key}`;
+  box.type = "text";
+  box.className = "name-input";
+  box.maxLength = TEXT_LIMIT[key];
+  box.value = original;
+  box.dataset.edit = mine;
+  box.setAttribute("aria-label", `${key} of ${item.id}`);
+  box.addEventListener("input", () => { setText(item, key, box.value.slice(0, TEXT_LIMIT[key])); render(); changed(); });
+  box.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { setText(item, key, original); render(); changed(); }
+    if (ev.key === "Enter" || ev.key === "Escape") box.blur();
+  });
+  box.addEventListener("blur", () => {
+    if (rebuilding || editing !== mine) return;
+    editing = null;
+    renderDock();
+  });
+  return box;
+}
+
+// Open the tables on this item's row with its name ready to type over.
+async function editNameInTable(id) {
+  if (!itemById(id)) return;
+  if (!dockOpen) await openDock();
+  else if (dirty) { clearTimeout(saveTimer); await save(); } // a brand new item is only in the tables once saved
+  if (!dockOpen) return;
+  setSelection([id]); // switches to its table and highlights the row
+  startEditing(id, "name");
 }
 
 function tickBox(description) {
@@ -794,11 +1178,20 @@ function tickBox(description) {
 }
 
 // Show or hide one property on the diagram for some items; kept in the table's column order.
+// Draw or hide arrows on the diagram. A hidden arrow stays in the tables and keeps its links.
+function setHidden(items, hide) {
+  for (const item of items) item.hidden = hide;
+  if (hide) setSelection([...selection].filter(id => !edgeById(id)?.hidden)); // it can't be selected if it can't be seen
+  else render();
+  changed();
+}
+
 function setShown(items, key, on) {
   for (const item of items) {
     const keys = new Set(shownOf(item));
     on ? keys.add(key) : keys.delete(key);
-    item.shown = Object.keys(titleOf[item.type]).filter(k => keys.has(k));
+    // Keep the table's column order when we know it; otherwise (tables not loaded yet) just add or remove.
+    item.shown = titleOf[item.type] ? Object.keys(titleOf[item.type]).filter(k => keys.has(k)) : [...keys];
   }
   render();
   changed();

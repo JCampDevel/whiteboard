@@ -31,7 +31,10 @@ button.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--a
 input[type=color] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--line);
   border-radius: 4px; vertical-align: middle; background: none; }
 label { color: var(--muted); }
-#status { color: var(--muted); margin-left: 8px; }
+#status-area { flex: 1 1 0; min-width: 0; display: flex; gap: 10px; align-items: center; white-space: nowrap; overflow: hidden; }
+#file-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#status { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#theme { min-width: 9.5em; } /* "Theme: Auto / Light / Dark" are different widths; keep the toolbar still */
 #scroller { flex: 1; overflow: hidden; position: relative; }
 #board { display: block; width: 100%; height: 100%; cursor: default; user-select: none;
   background-image: radial-gradient(var(--grid) 1px, transparent 1px);
@@ -105,3 +108,24 @@ input.name-input { flex: 1; width: auto; min-width: 0; }
 .name-text.empty { color: var(--muted); font-style: italic; }
 .col-grip { position: absolute; top: 0; bottom: 0; right: -3px; width: 7px; cursor: col-resize; z-index: 1; }
 .col-grip:hover { background: var(--accent); opacity: .5; }
+dialog { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 18px; box-shadow: 0 10px 30px rgba(0, 0, 0, .35); }
+dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog h2 { margin: 0 0 12px; font-size: 17px; }
+#file-dialog { width: min(560px, calc(100vw - 32px)); }
+#ask-dialog { max-width: min(440px, calc(100vw - 32px)); }
+#ask-text { margin: 0; white-space: pre-line; }
+.fd-where { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+#fd-dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+#fd-list { list-style: none; margin: 0; padding: 4px; height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+#fd-list button { width: 100%; text-align: left; border: 0; border-radius: 4px; background: none; padding: 5px 8px; }
+#fd-list button:hover, #fd-list button.chosen { background: var(--bar); }
+#fd-list button.folder::before { content: "📁  "; }
+#fd-list button.file::before { content: "📄  "; }
+#fd-list .hint { color: var(--muted); padding: 6px 8px; }
+.fd-name { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--fg); }
+.fd-name input { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+#fd-error { color: #ef4444; min-height: 1.2em; margin: 8px 0 0; }
+.fd-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }

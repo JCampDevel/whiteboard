@@ -37,17 +37,17 @@
     </label>
   </div>
   <div class="group">
-    <button id="save-file" title="Save a copy of the diagram to a JSON file (Ctrl+S)">Save as…</button>
-    <button id="open-file-btn" title="Open a diagram from a JSON file, replacing this one (Ctrl+O)">Open…</button>
-    <input type="file" id="open-file" accept=".json,application/json" hidden>
+    <button id="save-file" title="Save the diagram to a file and folder you choose, and carry on working there (Ctrl+S)">Save as…</button>
+    <button id="open-file-btn" title="Open a diagram file (Ctrl+O)">Open…</button>
     <button id="theme" title="Switch between following your system, light and dark">Theme: Auto</button>
     <button id="home" title="Return the view to your diagram">Home</button>
     <button id="reset-arrow" disabled title="Let the selected arrows choose their own sides and route again">Reset arrow</button>
     <button id="hide-arrow" disabled title="Hide the selected arrows from the diagram. They stay in the tables.">Hide arrow</button>
-    <button id="unhide" hidden title="Draw every hidden arrow again">Unhide arrows</button>
+    <button id="unhide" disabled title="Draw every hidden arrow again">Unhide arrows (0)</button>
     <button id="delete" disabled title="Delete the selected item (Delete)">Delete</button>
-    <span id="status" role="status">Loading…</span>
   </div>
+  <!-- Takes whatever room is left and shrinks, so a long message never pushes the toolbar onto two lines. -->
+  <div id="status-area"><span id="file-name"></span><span id="status" role="status">Loading…</span></div>
 </header>
 <main id="scroller">
   <svg id="board" xmlns="http://www.w3.org/2000/svg"><defs id="defs"></defs><g id="world"><g id="edges"></g><g id="nodes"></g><g id="handles"></g><g id="overlay"></g></g></svg>
@@ -60,6 +60,32 @@
   </div>
   <div id="tables" hidden></div>
 </section>
+<dialog id="file-dialog" aria-labelledby="fd-title">
+  <form id="fd-form">
+    <h2 id="fd-title">Save as</h2>
+    <div class="fd-where">
+      <button type="button" id="fd-up" title="Go up one folder">↑ Up</button>
+      <button type="button" id="fd-home" title="Go to your home folder">Home folder</button>
+      <span id="fd-dir"></span>
+    </div>
+    <ul id="fd-list" aria-label="Folders and diagram files"></ul>
+    <label class="fd-name">File name <input id="fd-name" type="text" autocomplete="off" spellcheck="false"></label>
+    <p id="fd-error" role="alert"></p>
+    <div class="fd-buttons">
+      <button type="button" id="fd-cancel">Cancel</button>
+      <button type="submit" id="fd-ok" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="ask-dialog" aria-labelledby="ask-text">
+  <form method="dialog">
+    <p id="ask-text"></p>
+    <div class="fd-buttons">
+      <button value="cancel">Cancel</button>
+      <button value="ok" id="ask-ok" class="primary">OK</button>
+    </div>
+  </form>
+</dialog>
 <script src="/route.js"></script>
 <script src="/app.js"></script>
 </body>

@@ -31,5 +31,5 @@ What the whiteboard must do. This is the current list only; wording from earlier
 
 ## Files
 
-- **R16. Saving and opening.** A diagram is saved in a human-readable format (indented JSON, one field per line, labelled as a whiteboard diagram). It saves automatically to its file, and the user can also save a copy to a file of their choice and open a diagram from a file. Files from earlier versions open and are upgraded; a file that is not a diagram is refused without changing the one on screen.
+- **R16. Saving and opening.** A diagram is saved in a human-readable format (indented JSON, one field per line, labelled as a whiteboard diagram) and saves automatically to the file being worked on. The user can save it to a file name and folder of their choice (Save as), after which that file is the one being worked on, and can open a diagram file, which then becomes the one being worked on. Before opening, the user is asked to confirm that any unsaved changes will be lost, with Open and Cancel; Cancel cancels the whole operation. Saving over an existing file asks first. Files from earlier versions open and are upgraded; a file that is not a diagram is refused without changing anything. Saving and opening never change the toolbar's layout.
 - **R17. Local only.** The app runs on the user's own machine and is not reachable from other machines.

@@ -72,17 +72,15 @@ The [README](README.md) covers everything else: Feedback arrows, moving and edit
 
 ## Where your work is saved
 
-The diagram saves itself a moment after every change, to `diagram.json` in the folder you started the app from. The status at the top right says **Saved**. Next time you start the app from the same folder, your diagram is there.
+The toolbar shows the name of the file you are working on. The diagram saves itself to it a moment after every change; the status beside the name says **Saved**. When you start the app it works on `diagram.json` in the folder you started it from, so next time you start it from the same folder, your diagram is there.
 
-To keep separate diagrams, start the app with a different file:
+To work on a different diagram:
 
-```
-python3 -m whiteboard --file pump-system.json
-```
+- **Save as…** in the toolbar saves the diagram under a name and folder you choose, and carries on working there.
+- **Open…** opens another diagram file and carries on working there.
+- Or start the app on a particular file: `python3 -m whiteboard --file pump-system.json` (created when you first draw something).
 
-The file is created when you first draw something. You can also use **Save as…** and **Open…** in the toolbar to save copies and open other files. Diagram files are plain JSON: you can read them in a text editor or keep them in git.
-
-`diagram.json` is listed in `.gitignore`, so your own diagram won't be committed by accident.
+Diagram files are plain JSON: you can read them in a text editor or keep them in git. `diagram.json` is listed in `.gitignore`, so your own diagram in the project folder won't be committed by accident.
 
 ## Options
 
@@ -123,5 +121,6 @@ The tests use temporary files and a random port only; they never touch your diag
 | `Address already in use` | Something else (perhaps another copy of the whiteboard) is using port 8000. Stop it, or start with `--port 9000`. |
 | The browser shows "This site can't be reached" | The app isn't running. Check the terminal: start it again, and look for an error message. |
 | Status says **Could not load** | The diagram file is damaged or isn't a whiteboard diagram. The message says what is wrong. Fix the file, or start with a different `--file`. |
+| The Save / Open dialog says the server can't be reached | Same as below: the app has stopped. Start it again. |
 | Status says **Not saved: server unreachable** | The terminal running the app was closed or stopped. Start it again; then make any small change so it saves. |
 | The page looks old after `git pull` | Restart the app, then reload the page. |

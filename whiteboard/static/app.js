@@ -31,6 +31,12 @@ const shownOf = (item) => item.shown || DEFAULT_SHOWN;
 const DEFAULT_SIZE = { controller: { w: 360, h: 140 }, controlled_process: { w: 360, h: 100 } };
 
 const $ = (id) => document.getElementById(id);
+// Every request to the app's own server carries this header: the server refuses API requests without it,
+// which stops other web pages open in the browser from using it.
+const api = (path, options = {}) => fetch(path, {
+  ...options,
+  headers: { "X-Whiteboard": "1", ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) },
+});
 const board = $("board"), scroller = $("scroller"), statusEl = $("status");
 const styleEl = $("style"), deleteBtn = $("delete"), hideBtn = $("hide-arrow"), unhideBtn = $("unhide"), resetBtn = $("reset-arrow");
 const colourBtn = $("colour-btn"), swatchEl = $("colour-swatch"), paletteEl = $("palette"), themeBtn = $("theme");
@@ -382,7 +388,7 @@ function render() {
   deleteBtn.disabled = selection.size === 0;
   const hiddenCount = diagram.edges.filter(e => e.hidden).length;
   hideBtn.disabled = ![...selection].some(id => edgeById(id) && !edgeById(id).hidden);
-  unhideBtn.hidden = !hiddenCount;
+  unhideBtn.disabled = !hiddenCount; // always there, so the toolbar doesn't change length
   unhideBtn.textContent = `Unhide arrows (${hiddenCount})`;
   resetBtn.disabled = ![...selection].map(edgeById).some(e => e && (e.source_anchor || e.target_anchor || (e.via && e.via.length)));
 }
@@ -402,7 +408,7 @@ function toggle(id) {
 }
 
 // ---------- saving ----------
-function setStatus(text) { statusEl.textContent = text; }
+function setStatus(text) { statusEl.textContent = text; statusEl.title = text; }
 function changed() {
   dirty = true;
   setStatus("Unsaved…");
@@ -411,7 +417,7 @@ function changed() {
 }
 async function save() {
   try {
-    const r = await fetch("/api/diagram", {
+    const r = await api("/api/diagram", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(diagram),
     });
     if (r.ok) { dirty = false; setStatus("Saved"); await loadTables(); }
@@ -419,8 +425,9 @@ async function save() {
   } catch { setStatus("Not saved: server unreachable"); }
 }
 async function load() {
+  refreshFileInfo();
   try {
-    const r = await fetch("/api/diagram");
+    const r = await api("/api/diagram");
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
     diagram = data;
@@ -546,9 +553,10 @@ resetBtn.addEventListener("click", () => {
 
 const KEYS = { s: "select", h: "pan", c: "controller", p: "controlled_process", a: "control_action", f: "feedback" };
 document.addEventListener("keydown", (ev) => {
+  if (document.querySelector("dialog[open]")) return; // a Save / Open / question box has the keyboard
   if (ev.key === "Escape" && !paletteEl.hidden) { closePalette(); return; }
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "s") { ev.preventDefault(); saveToFile(); return; }
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "o") { ev.preventDefault(); fileInput.click(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "s") { ev.preventDefault(); openFileDialog("save"); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "o") { ev.preventDefault(); openFileDialog("open"); return; }
   if (ev.target.matches("input, select")) return;
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") {
     setSelection([...diagram.nodes, ...diagram.edges.filter(e => !e.hidden)].map(i => i.id));
@@ -803,67 +811,140 @@ board.addEventListener("dblclick", (ev) => {
   if (id) editNameInTable(id);
 });
 
-// ---------- save as / open a file ----------
-// The diagram always autosaves to the file the app was started with. These save a copy anywhere you like,
-// and open another file in its place. Files are indented JSON, readable and editable in any text editor.
-const fileInput = $("open-file");
-$("save-file").addEventListener("click", () => saveToFile());
-$("open-file-btn").addEventListener("click", () => fileInput.click());
+// ---------- Save as / Open ----------
+// The diagram autosaves to the file being worked on. Save as saves it to a file and folder you choose and
+// carries on there; Open switches to another file. Both use this page's own dialog (not every browser can
+// show a real one), which lists folders through the app's server. Files are indented JSON.
+const fileDialog = $("file-dialog"), fdList = $("fd-list"), fdName = $("fd-name"), fdDir = $("fd-dir");
+const fdError = $("fd-error"), fdOk = $("fd-ok"), fdUp = $("fd-up"), askDialog = $("ask-dialog"), askOk = $("ask-ok");
+let currentFile = null; // {path, name, dir} of the file being worked on
+let fd = null;          // the file dialog while it is open: {mode: "save" | "open", dir, parent, home}
+let fdBusy = false;
+$("save-file").addEventListener("click", () => openFileDialog("save"));
+$("open-file-btn").addEventListener("click", () => openFileDialog("open"));
 
-async function saveToFile() {
-  clearTimeout(saveTimer);
-  if (dirty) await save();
-  let text;
-  try { // the server's copy: checked, and in the saved format
-    const r = await fetch("/api/diagram");
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error);
-    text = JSON.stringify(data, null, 2) + "\n";
-  } catch (err) { setStatus("Could not save a copy: " + err.message); return; }
-  const name = `diagram-${new Date().toISOString().slice(0, 10)}.json`;
-  if (window.showSaveFilePicker) { // browsers that let you choose where (Chrome, Edge)
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: name, types: [{ description: "Whiteboard diagram", accept: { "application/json": [".json"] } }],
-      });
-      const out = await handle.createWritable();
-      await out.write(text);
-      await out.close();
-      setStatus(`Saved a copy as ${handle.name}`);
-    } catch (err) { if (err.name !== "AbortError") setStatus("Could not save a copy: " + err.message); }
-    return;
-  }
-  const a = document.createElement("a"); // other browsers: an ordinary download
-  a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-  a.download = name;
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  setStatus(`Saved a copy as ${name} (in your downloads)`);
+async function refreshFileInfo() {
+  try {
+    const r = await api("/api/file");
+    if (r.ok) { currentFile = await r.json(); showFileName(); }
+  } catch { /* the status already says if the server can't be reached */ }
+}
+function showFileName() {
+  const label = $("file-name");
+  label.textContent = currentFile ? currentFile.name : "";
+  label.title = currentFile ? `Working on ${currentFile.path}` : "";
+  document.title = currentFile ? `${currentFile.name} – Whiteboard` : "Whiteboard";
 }
 
-fileInput.addEventListener("change", async () => {
-  const file = fileInput.files[0];
-  fileInput.value = ""; // so choosing the same file again still counts
-  if (!file) return;
+function openFileDialog(mode) {
+  if (fileDialog.open) return;
+  fd = { mode };
+  $("fd-title").textContent = mode === "save" ? "Save as" : "Open";
+  fdOk.textContent = mode === "save" ? "Save" : "Open";
+  fdName.value = mode === "save" && currentFile ? currentFile.name : "";
+  fdError.textContent = "";
+  fileDialog.showModal();
+  fdName.focus();
+  fdName.select();
+  showFolder(currentFile ? currentFile.dir : "");
+}
+
+async function showFolder(dir) {
+  fdError.textContent = "";
   let data;
-  try { data = JSON.parse(await file.text()); } catch { setStatus(`${file.name} is not a JSON file`); return; }
-  if (diagram.nodes.length &&
-      !confirm(`Open ${file.name}?\n\nIt replaces the diagram on screen. Use "Save as…" first if you want to keep this one.`)) return;
-  clearTimeout(saveTimer);
-  try { // the server checks it (and upgrades a file from an older version) before anything is replaced
-    const r = await fetch("/api/diagram", {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
-    });
-    if (!r.ok) throw new Error((await r.json()).error || r.status);
-  } catch (err) { setStatus(`Could not open ${file.name}: ${err.message}`); return; }
+  try {
+    const r = await api("/api/browse" + (dir ? "?dir=" + encodeURIComponent(dir) : ""));
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+  } catch (err) { fdError.textContent = err.message; return; }
+  Object.assign(fd, { dir: data.dir, parent: data.parent, home: data.home });
+  fdDir.textContent = data.dir;
+  fdDir.title = data.dir;
+  fdUp.disabled = !data.parent;
+  fdList.replaceChildren();
+  const entry = (text, cls, onClick, onDouble) => {
+    const li = html("li"), b = html("button", text, cls);
+    b.type = "button";
+    b.addEventListener("click", onClick);
+    if (onDouble) b.addEventListener("dblclick", onDouble);
+    li.append(b);
+    fdList.append(li);
+    return b;
+  };
+  for (const f of data.folders) entry(f.name, "folder", () => showFolder(f.path));
+  for (const f of data.files) {
+    const b = entry(f.name, "file", () => {
+      fdName.value = f.name;
+      fdList.querySelectorAll(".chosen").forEach(x => x.classList.remove("chosen"));
+      b.classList.add("chosen");
+    }, () => { fdName.value = f.name; submitFileDialog(); });
+  }
+  if (!data.folders.length && !data.files.length) fdList.append(html("li", "No folders or diagram files here.", "hint"));
+}
+
+fdUp.addEventListener("click", () => { if (fd && fd.parent) showFolder(fd.parent); });
+$("fd-home").addEventListener("click", () => { if (fd) showFolder(fd.home || ""); });
+$("fd-cancel").addEventListener("click", () => fileDialog.close());
+$("fd-form").addEventListener("submit", (ev) => { ev.preventDefault(); submitFileDialog(); });
+
+async function submitFileDialog() {
+  if (fdBusy || !fd) return;
+  const name = fdName.value.trim();
+  if (!name) { fdError.textContent = "Type a file name, or pick a file from the list."; return; }
+  fdBusy = true;
+  try {
+    if (fd.mode === "save") await saveAs(name, false);
+    else await openFile(name);
+  } catch { fdError.textContent = "The app's server can't be reached. Is it still running?"; }
+  finally { fdBusy = false; }
+}
+
+async function saveAs(name, overwrite) {
+  const r = await api("/api/save-as", { method: "POST", body: JSON.stringify({ dir: fd.dir, name, overwrite, diagram }) });
+  const data = await r.json();
+  if (r.status === 409 && data.exists) {
+    if (await ask(`${data.name} already exists in this folder.\nDo you want to replace it?`, "Replace")) return saveAs(name, true);
+    return;
+  }
+  if (!r.ok) { fdError.textContent = data.error; return; }
+  clearTimeout(saveTimer); // everything on screen is now in the new file
+  dirty = false;
+  currentFile = data.file;
+  showFileName();
+  fileDialog.close();
+  setStatus(`Saved as ${data.file.name}`);
+}
+
+async function openFile(name) {
+  if (!(await ask(`Open ${name}?\nAny unsaved changes will be lost.`, "Open"))) {
+    fileDialog.close(); // Cancel cancels the whole thing
+    return;
+  }
+  const r = await api("/api/open", { method: "POST", body: JSON.stringify({ dir: fd.dir, name }) });
+  const data = await r.json();
+  if (!r.ok) { fdError.textContent = data.error; return; } // nothing has changed; pick another file
+  clearTimeout(saveTimer); // anything not yet autosaved is dropped, as the question said
   dirty = false;
   editing = null;
+  currentFile = data.file;
+  showFileName();
+  fileDialog.close();
   selection = new Set();
   await load();
-  setStatus(`Opened ${file.name}`);
-});
+  setStatus(`Opened ${data.file.name}`);
+}
+
+// A question with two buttons: resolves true for the OK button (labelled okLabel), false for Cancel or Esc.
+function ask(message, okLabel) {
+  return new Promise((resolve) => {
+    $("ask-text").textContent = message;
+    askOk.textContent = okLabel;
+    askDialog.returnValue = "";
+    askDialog.addEventListener("close", () => resolve(askDialog.returnValue === "ok"), { once: true });
+    askDialog.showModal();
+    askOk.focus();
+  });
+}
 
 // ---------- tables ----------
 // A panel under the diagram, one tab per entity type. Selecting something on the diagram
@@ -896,7 +977,7 @@ async function openDock() {
 
 async function loadTables() {
   try {
-    const r = await fetch("/api/tables");
+    const r = await api("/api/tables");
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
     tableData = data.tables;

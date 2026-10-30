@@ -21,7 +21,9 @@ GOOD = {
 }
 
 
-class ServerTests(unittest.TestCase):
+class ServerCase(unittest.TestCase):
+    """Starts a server on a free localhost port with its file in a temporary folder."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.file = Path(self.tmp.name) / "d.json"
@@ -35,15 +37,18 @@ class ServerTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def call(self, method, path, body=None, headers=None):
+        """A request as the page makes it (with the API header), unless `headers` says otherwise."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         if isinstance(body, (dict, list)):
             body = json.dumps(body)
-        c.request(method, path, body=body, headers=headers or {})
+        c.request(method, path, body=body, headers={"X-Whiteboard": "1", **(headers or {})})
         r = c.getresponse()
         data = r.read()
         c.close()
         return r.status, data
 
+
+class ServerTests(ServerCase):
     def test_binds_to_localhost_only(self):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
 
@@ -123,6 +128,7 @@ class ServerTests(unittest.TestCase):
     def test_oversize_body_rejected_without_reading_it(self):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         c.putrequest("PUT", "/api/diagram")
+        c.putheader("X-Whiteboard", "1")
         c.putheader("Content-Length", str(50 * 1024 * 1024))
         c.endheaders()
         self.assertEqual(c.getresponse().status, 413)
@@ -137,3 +143,123 @@ class ServerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProtectionTests(ServerCase):
+    """Other web pages open in the same browser must not be able to use the API."""
+
+    def test_api_needs_the_page_header(self):
+        for method, path, body in (("GET", "/api/diagram", None), ("GET", "/api/browse", None),
+                                   ("PUT", "/api/diagram", GOOD), ("POST", "/api/open", {"dir": "/", "name": "x"})):
+            with self.subTest(path=path):
+                c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+                c.request(method, path, body=json.dumps(body) if body else None)
+                self.assertEqual(c.getresponse().status, 403)
+                c.close()
+        self.assertFalse(self.file.exists())
+
+    def test_requests_for_another_host_name_are_refused(self):
+        # What a DNS-rebinding page would send: our address, but its own host name.
+        for path in ("/", "/api/diagram"):
+            with self.subTest(path=path):
+                status, _ = self.call("GET", path, headers={"Host": f"evil.example:{self.port}"})
+                self.assertEqual(status, 403)
+        self.assertEqual(self.call("GET", "/", headers={"Host": f"localhost:{self.port}"})[0], 200)
+
+
+class FileTests(ServerCase):
+    """Save as and Open: the page's own dialogs, which switch the file being worked on."""
+
+    def setUp(self):
+        super().setUp()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "sub").mkdir()
+        (self.dir / ".hidden").mkdir()
+        (self.dir / "notes.txt").write_text("x")
+        (self.dir / "B.json").write_text("{}")
+        (self.dir / "a.json").write_text("{}")
+
+    def post(self, path, body):
+        status, data = self.call("POST", path, body)
+        return status, json.loads(data)
+
+    def test_current_file(self):
+        status, data = self.call("GET", "/api/file")
+        self.assertEqual((status, json.loads(data)["name"]), (200, "d.json"))
+
+    def test_browse_lists_folders_and_json_files_only(self):
+        status, data = self.call("GET", "/api/browse")  # defaults to the current file's folder
+        data = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["dir"], str(self.dir.resolve()))
+        self.assertEqual([f["name"] for f in data["folders"]], ["sub"])
+        self.assertEqual([f["name"] for f in data["files"]], ["a.json", "B.json"])
+        self.assertEqual(data["parent"], str(self.dir.resolve().parent))
+
+    def test_browse_errors(self):
+        from urllib.parse import quote
+        self.assertEqual(self.call("GET", "/api/browse?dir=" + quote(str(self.dir / "missing")))[0], 404)
+        self.assertEqual(self.call("GET", "/api/browse?dir=relative/path")[0], 400)
+        self.assertEqual(self.call("GET", "/api/browse?dir=" + quote(str(self.dir / "a.json")))[0], 400)
+
+    def test_save_as_writes_the_file_and_switches_to_it(self):
+        status, data = self.post("/api/save-as", {"dir": str(self.dir / "sub"), "name": "pump", "diagram": GOOD})
+        self.assertEqual(status, 200)
+        new = self.dir.resolve() / "sub" / "pump.json"  # .json added
+        self.assertEqual(data["file"]["path"], str(new))
+        self.assertEqual(json.loads(new.read_text())["format"], "whiteboard-diagram")
+        # Autosave now goes to the new file; the old one is left alone.
+        self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})
+        self.assertEqual(json.loads(new.read_text())["nodes"], [])
+        self.assertFalse(self.file.exists())
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "pump.json")
+
+    def test_save_as_asks_before_replacing_a_file(self):
+        status, data = self.post("/api/save-as", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD})
+        self.assertEqual((status, data["exists"], data["name"]), (409, True, "a.json"))
+        self.assertEqual((self.dir / "a.json").read_text(), "{}")
+        status, _ = self.post("/api/save-as", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD, "overwrite": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads((self.dir / "a.json").read_text())["nodes"]), 4)
+
+    def test_save_as_refuses_bad_names_and_bad_diagrams(self):
+        for body in ({"dir": str(self.dir), "name": "", "diagram": GOOD},
+                     {"dir": str(self.dir), "name": "../escape", "diagram": GOOD},
+                     {"dir": str(self.dir), "name": "a/b", "diagram": GOOD},
+                     {"dir": str(self.dir / "missing"), "name": "x", "diagram": GOOD},
+                     {"dir": "relative", "name": "x", "diagram": GOOD},
+                     {"dir": str(self.dir), "name": "x", "diagram": {"nodes": [{"id": "C1"}]}},
+                     ["not", "an", "object"]):
+            with self.subTest(body=body):
+                self.assertEqual(self.call("POST", "/api/save-as", body)[0], 400)
+        (self.dir / "folder.json").mkdir()
+        self.assertEqual(self.post("/api/save-as", {"dir": str(self.dir), "name": "folder.json", "diagram": GOOD})[0], 400)
+        self.assertFalse((self.dir.parent / "escape.json").exists())
+
+    def test_open_switches_to_the_file_and_returns_its_diagram(self):
+        good = self.dir / "good.json"
+        good.write_text(json.dumps(GOOD))
+        status, data = self.post("/api/open", {"dir": str(self.dir), "name": "good.json"})
+        self.assertEqual(status, 200)
+        self.assertEqual((data["file"]["name"], len(data["diagram"]["nodes"])), ("good.json", 4))
+        self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})  # autosave now goes to good.json
+        self.assertEqual(json.loads(good.read_text())["nodes"], [])
+
+    def test_open_upgrades_an_older_file(self):
+        (self.dir / "old.json").write_text(json.dumps({
+            "nodes": [{"id": "n1", "type": "controller", "x": 0, "y": 0, "w": 100, "h": 60}], "edges": []}))
+        status, data = self.post("/api/open", {"dir": str(self.dir), "name": "old"})  # .json added here too
+        self.assertEqual(status, 200)
+        self.assertEqual(sorted(n["id"] for n in data["diagram"]["nodes"]), ["C1", "CA1", "PM1"])
+
+    def test_a_file_that_cannot_be_opened_changes_nothing(self):
+        self.call("PUT", "/api/diagram", GOOD)
+        (self.dir / "bad.json").write_text('{"format": "spreadsheet"}')
+        (self.dir / "broken.json").write_text("{not json")
+        for name, status in (("bad.json", 400), ("broken.json", 400), ("missing.json", 404)):
+            with self.subTest(name=name):
+                got, data = self.post("/api/open", {"dir": str(self.dir), "name": name})
+                self.assertEqual(got, status)
+                self.assertIn(name, data["error"])
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "d.json")
+        self.assertEqual(len(json.loads(self.file.read_text())["nodes"]), 4)

@@ -68,10 +68,12 @@ Files from earlier versions are upgraded when opened: items get IDs with the cur
 
 ## Saving and opening
 
-The diagram saves automatically (status shown top right) to the file the app was started with (`diagram.json` unless you gave `--file`).
+The name of the file you are working on is shown in the toolbar. Every change is saved to it automatically a moment later (the status beside it says **Saved**). When the app starts, that is `diagram.json` in the folder you started it from, or the file you gave with `--file`.
 
-- **Save as…** (Ctrl+S) saves a copy to a JSON file. Chrome and Edge ask where to put it; other browsers put it in your downloads as `diagram-<date>.json`.
-- **Open…** (Ctrl+O) opens a diagram from a JSON file. It replaces the diagram on screen (it asks first), so Save as… before if you want to keep the current one. Files from older versions of the app are upgraded as they open; a file that isn't a diagram is refused and nothing changes.
+- **Save as…** (Ctrl+S) opens a Save dialog: pick a folder (click a folder to go into it, **↑ Up** to go back, **Home folder** to start from your home folder), type a file name (`.json` is added if you leave it off) and click **Save**. If the file already exists you are asked before it is replaced. From then on you are working on the new file and changes save there; the old file is left as it was.
+- **Open…** (Ctrl+O) opens the same dialog: pick a diagram file (click it, then **Open**, or double-click it). You are asked "Any unsaved changes will be lost": **Open** opens it, **Cancel** stops and nothing changes. From then on you are working on that file. Files from older versions of the app are upgraded as they open; a file that isn't a diagram is refused, with the reason, and nothing changes.
+
+Because the app saves as you go, there are normally no unsaved changes; only an edit made in the last half second, or one that couldn't be saved (the status would say so), is ever lost.
 
 Files are plain, indented JSON, one field per line, starting with `"format": "whiteboard-diagram"`, so you can read them, compare versions, keep them in git or edit them in a text editor. If you edit one by hand and make a mistake, Open… tells you what is wrong rather than loading it.
 

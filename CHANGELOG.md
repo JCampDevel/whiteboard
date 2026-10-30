@@ -4,6 +4,32 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.12.0, 2026-10-30: Real Save as / Open, a proper Open prompt, steady toolbar
+
+Asked: when saving, choose the file name and folder; when opening, a prompt saying unsaved changes will be lost, with Open (opens it) and Cancel (cancels); and the toolbar shouldn't jump to two lines and back when saving.
+
+**Added**
+- **The app's own Save and Open dialog**, in every browser: browse folders (Up, Home folder), see the diagram files there, type or pick a name. Before, only Chrome and Edge let you choose where to save; Firefox put the file in Downloads with a fixed name.
+- **Open asks first**: "Open X? Any unsaved changes will be lost." with **Open** and **Cancel**. Cancel cancels everything.
+- **Save as asks before replacing** an existing file (Replace / Cancel).
+- **The file you are working on** is shown in the toolbar and the browser tab.
+- Server: `GET /api/file`, `GET /api/browse`, `POST /api/save-as`, `POST /api/open`.
+- **Server safety**: requests must be addressed to 127.0.0.1 / localhost (stops DNS rebinding) and API requests must carry an `X-Whiteboard` header (stops other web pages in the same browser from using the server). Needed now that the server can list folders and write files.
+
+**Changed**
+- **Save as and Open switch the file being worked on**, like a desktop app. Before, Save as only saved a copy, and Open *copied the opened file over the current one* (`diagram.json`), which lost the diagram you had been working on if you hadn't saved a copy. Now opening leaves the previous file untouched.
+- **The toolbar no longer changes length**: the status and file name share a space that shrinks (long messages end in "…", full text on hover); the Theme button has a fixed width; **Unhide arrows (n)** is always shown and greyed out at 0, instead of appearing and disappearing.
+- Removed: the browser's own file picker and download for Open / Save as.
+- Requirement R16 rewritten.
+
+**Docs**: REQUIREMENTS.md (R16), DESIGN.md (Save as / Open, server safety, toolbar), README (Saving and opening), GETTING_STARTED.md (where work is saved, one more troubleshooting row).
+
+**Tests**: 85 (was 74). New: the API refuses requests without the header and requests for another host name; the current file; browsing (folders and `.json` files only, hidden ones left out, sorted; errors for missing, relative and non-folder paths); Save as (writes, adds `.json`, switches autosave to the new file and leaves the old one, asks before replacing, refuses bad names, folders and diagrams); Open (switches to the file, upgrades an old file, refuses bad / broken / missing files and changes nothing). Server tests now share a base class instead of re-running each other.
+
+**Not verified**: the dialogs and toolbar are browser code and have not been run. Check: Save as into another folder and keep drawing (the toolbar name changes and the new file updates); Save as over an existing file (asks); Open then Cancel (nothing changes); Open then Open; Open a non-diagram (refused, reason shown); Esc in each dialog; the toolbar at a narrow window width while the status changes.
+
+---
+
 ## 0.11.1, 2026-10-30: Getting started guide
 
 **Docs**

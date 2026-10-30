@@ -93,9 +93,9 @@ class ServerTests(ServerCase):
         self.assertIn("not a whiteboard diagram", json.loads(data)["error"])
         self.assertEqual(self.file.read_text(), before)
 
-    def test_tables_come_from_the_saved_diagram(self):
-        self.call("PUT", "/api/diagram", GOOD)
-        status, data = self.call("GET", "/api/tables")
+    def test_tables_come_from_the_diagram_sent_not_the_file(self):
+        # The page asks for tables of what is on screen, saved or not.
+        status, data = self.call("POST", "/api/tables", GOOD)
         self.assertEqual(status, 200)
         tables = json.loads(data)["tables"]
         self.assertEqual([t["key"] for t in tables], [
@@ -104,11 +104,12 @@ class ServerTests(ServerCase):
         controller = tables[0]["rows"][0]
         self.assertEqual((controller["id"], controller["control_algorithm"], controller["outgoing"], controller["incoming"]),
                          ("C1", "CA1", ["A1"], ["F1"]))
+        self.assertFalse(self.file.exists())  # nothing was written
 
-    def test_tables_for_an_empty_diagram(self):
-        status, data = self.call("GET", "/api/tables")
-        self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads(data)["tables"]), 7)
+    def test_tables_for_an_empty_diagram_and_a_bad_one(self):
+        status, data = self.call("POST", "/api/tables", {"nodes": [], "edges": []})
+        self.assertEqual((status, len(json.loads(data)["tables"])), (200, 7))
+        self.assertEqual(self.call("POST", "/api/tables", {"nodes": [{"id": "C1"}]})[0], 400)
 
     def test_an_old_format_file_is_upgraded_when_opened(self):
         self.file.write_text(json.dumps({
@@ -138,7 +139,6 @@ class ServerTests(ServerCase):
     def test_corrupt_file_gives_500_not_a_crash(self):
         self.file.write_text("{broken")
         self.assertEqual(self.call("GET", "/api/diagram")[0], 500)
-        self.assertEqual(self.call("GET", "/api/tables")[0], 500)
         self.assertEqual(self.call("GET", "/")[0], 200)
 
 
@@ -186,7 +186,7 @@ class FileTests(ServerCase):
 
     def test_current_file(self):
         status, data = self.call("GET", "/api/file")
-        self.assertEqual((status, json.loads(data)["name"]), (200, "d.json"))
+        self.assertEqual((status, json.loads(data)["open"], json.loads(data)["name"]), (200, True, "d.json"))
 
     def test_browse_lists_folders_and_json_files_only(self):
         status, data = self.call("GET", "/api/browse")  # defaults to the current file's folder
@@ -203,39 +203,70 @@ class FileTests(ServerCase):
         self.assertEqual(self.call("GET", "/api/browse?dir=relative/path")[0], 400)
         self.assertEqual(self.call("GET", "/api/browse?dir=" + quote(str(self.dir / "a.json")))[0], 400)
 
-    def test_save_as_writes_the_file_and_switches_to_it(self):
-        status, data = self.post("/api/save-as", {"dir": str(self.dir / "sub"), "name": "pump", "diagram": GOOD})
+    def test_new_project_creates_an_empty_file_and_opens_it(self):
+        status, data = self.post("/api/new", {"dir": str(self.dir / "sub"), "name": "Pump system"})
         self.assertEqual(status, 200)
-        new = self.dir.resolve() / "sub" / "pump.json"  # .json added
-        self.assertEqual(data["file"]["path"], str(new))
+        new = self.dir.resolve() / "sub" / "Pump system.json"  # the name is the file name; .json added
+        self.assertEqual((data["file"]["path"], data["diagram"]["nodes"]), (str(new), []))
         self.assertEqual(json.loads(new.read_text())["format"], "whiteboard-diagram")
-        # Autosave now goes to the new file; the old one is left alone.
-        self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})
-        self.assertEqual(json.loads(new.read_text())["nodes"], [])
+        self.call("PUT", "/api/diagram", GOOD)  # Save now writes the new project
+        self.assertEqual(len(json.loads(new.read_text())["nodes"]), 4)
         self.assertFalse(self.file.exists())
-        self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "pump.json")
 
-    def test_save_as_asks_before_replacing_a_file(self):
-        status, data = self.post("/api/save-as", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD})
+    def test_new_project_asks_before_replacing_a_file(self):
+        status, data = self.post("/api/new", {"dir": str(self.dir), "name": "a"})
         self.assertEqual((status, data["exists"], data["name"]), (409, True, "a.json"))
         self.assertEqual((self.dir / "a.json").read_text(), "{}")
-        status, _ = self.post("/api/save-as", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD, "overwrite": True})
-        self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads((self.dir / "a.json").read_text())["nodes"]), 4)
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "d.json")  # still the old project
+        self.assertEqual(self.post("/api/new", {"dir": str(self.dir), "name": "a", "overwrite": True})[0], 200)
+        self.assertEqual(json.loads((self.dir / "a.json").read_text())["nodes"], [])
 
-    def test_save_as_refuses_bad_names_and_bad_diagrams(self):
-        for body in ({"dir": str(self.dir), "name": "", "diagram": GOOD},
-                     {"dir": str(self.dir), "name": "../escape", "diagram": GOOD},
-                     {"dir": str(self.dir), "name": "a/b", "diagram": GOOD},
-                     {"dir": str(self.dir / "missing"), "name": "x", "diagram": GOOD},
-                     {"dir": "relative", "name": "x", "diagram": GOOD},
-                     {"dir": str(self.dir), "name": "x", "diagram": {"nodes": [{"id": "C1"}]}},
-                     ["not", "an", "object"]):
-            with self.subTest(body=body):
-                self.assertEqual(self.call("POST", "/api/save-as", body)[0], 400)
+    def test_save_copy_writes_a_copy_and_stays_on_the_project(self):
+        self.call("PUT", "/api/diagram", GOOD)
+        status, data = self.post("/api/save-copy", {"dir": str(self.dir), "name": "snapshot", "diagram": GOOD})
+        self.assertEqual((status, data["file"]["name"]), (200, "snapshot.json"))
+        copy = self.dir / "snapshot.json"
+        self.assertEqual(len(json.loads(copy.read_text())["nodes"]), 4)
+        # Saving the project afterwards leaves the copy as it was.
+        self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})
+        self.assertEqual(len(json.loads(copy.read_text())["nodes"]), 4)
+        self.assertEqual(json.loads(self.file.read_text())["nodes"], [])
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "d.json")
+
+    def test_save_copy_asks_before_replacing_and_never_onto_the_project_itself(self):
+        status, data = self.post("/api/save-copy", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD})
+        self.assertEqual((status, data["exists"]), (409, True))
+        self.assertEqual(self.post("/api/save-copy", {"dir": str(self.dir), "name": "a.json", "diagram": GOOD, "overwrite": True})[0], 200)
+        status, data = self.post("/api/save-copy", {"dir": str(self.dir), "name": "d", "diagram": GOOD, "overwrite": True})
+        self.assertEqual(status, 400)
+        self.assertIn("project itself", data["error"])
+
+    def test_bad_names_folders_and_diagrams_are_refused(self):
+        for path, body in (
+            ("/api/new", {"dir": str(self.dir), "name": ""}),
+            ("/api/new", {"dir": str(self.dir), "name": "../escape"}),
+            ("/api/new", {"dir": str(self.dir), "name": "a/b"}),
+            ("/api/new", {"dir": str(self.dir / "missing"), "name": "x"}),
+            ("/api/new", {"dir": "relative", "name": "x"}),
+            ("/api/new", ["not", "an", "object"]),
+            ("/api/save-copy", {"dir": str(self.dir), "name": "x", "diagram": {"nodes": [{"id": "C1"}]}}),
+            ("/api/save-copy", {"dir": str(self.dir), "name": "../escape", "diagram": GOOD}),
+        ):
+            with self.subTest(path=path, body=str(body)[:60]):
+                self.assertEqual(self.call("POST", path, body)[0], 400)
         (self.dir / "folder.json").mkdir()
-        self.assertEqual(self.post("/api/save-as", {"dir": str(self.dir), "name": "folder.json", "diagram": GOOD})[0], 400)
+        self.assertEqual(self.post("/api/new", {"dir": str(self.dir), "name": "folder.json", "overwrite": True})[0], 400)
         self.assertFalse((self.dir.parent / "escape.json").exists())
+
+    def test_close_leaves_no_project_open(self):
+        self.call("PUT", "/api/diagram", GOOD)
+        self.assertEqual(self.call("POST", "/api/close", {})[0], 200)
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1]), {"open": False})
+        self.assertEqual(self.call("GET", "/api/diagram")[0], 409)
+        self.assertEqual(self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})[0], 409)  # nothing to save into
+        self.assertEqual(len(json.loads(self.file.read_text())["nodes"]), 4)  # closing wrote nothing
+        # The dialogs carry on in the last folder used.
+        self.assertEqual(json.loads(self.call("GET", "/api/browse")[1])["dir"], str(self.dir.resolve()))
 
     def test_open_switches_to_the_file_and_returns_its_diagram(self):
         good = self.dir / "good.json"
@@ -275,12 +306,11 @@ class RobustnessTests(ServerCase):
         self.assertEqual(self.call("GET", "/api/diagram")[0], 500)  # the page shows "Could not load"
         status, data = self.call("PUT", "/api/diagram", GOOD)       # ...and the user draws something
         self.assertEqual(status, 409)
-        self.assertIn("Save as", json.loads(data)["error"])
+        self.assertIn("Save copy", json.loads(data)["error"])
         self.assertEqual(self.file.read_text(), original)
-        # Save as elsewhere still works, and from then on autosave goes there.
-        status, _ = self.call("POST", "/api/save-as", {"dir": self.tmp.name, "name": "rescued", "diagram": GOOD})
+        # Save copy still works, so the drawing can be kept.
+        status, _ = self.call("POST", "/api/save-copy", {"dir": self.tmp.name, "name": "rescued", "diagram": GOOD})
         self.assertEqual(status, 200)
-        self.assertEqual(self.call("PUT", "/api/diagram", GOOD)[0], 200)
         self.assertEqual(self.file.read_text(), original)
 
     def test_unreadable_working_files_give_a_reason_not_a_dropped_connection(self):
@@ -290,7 +320,7 @@ class RobustnessTests(ServerCase):
         self.assertIn("not a text file", json.loads(data)["error"])
         self.file.unlink()
         self.file.mkdir()  # a folder where the file should be
-        self.assertEqual(self.call("GET", "/api/tables")[0], 500)
+        self.assertEqual(self.call("GET", "/api/diagram")[0], 500)
 
     def test_odd_bodies_and_paths_get_an_answer(self):
         odd = [
@@ -300,7 +330,8 @@ class RobustnessTests(ServerCase):
             ("PUT", "/api/diagram", "[" * 100000),
             ("GET", "/api/browse?dir=~nosuchuser_xyz/x", None),
             ("GET", "/api/browse?dir=/tmp%00x", None),
-            ("POST", "/api/save-as", {"dir": "~nosuchuser_xyz", "name": "x", "diagram": GOOD}),
+            ("POST", "/api/save-copy", {"dir": "~nosuchuser_xyz", "name": "x", "diagram": GOOD}),
+            ("POST", "/api/new", {"dir": "/tmp%00x", "name": "x"}),
         ]
         for method, path, body in odd:
             with self.subTest(path=path, body=str(body)[:60]):
@@ -346,10 +377,37 @@ class RobustnessTests(ServerCase):
         self.assertEqual(self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})[0], 200)
         self.assertTrue(link.is_symlink())
         self.assertEqual(json.loads(real.read_text())["nodes"], [])
-        # Save as onto a link that points at a missing file writes that file and keeps the link.
+        # Save copy onto a link that points at a missing file writes that file and keeps the link.
         dangling = Path(self.tmp.name) / "dangling.json"
         dangling.symlink_to(Path(self.tmp.name) / "nowhere.json")
-        status, _ = self.call("POST", "/api/save-as", {"dir": self.tmp.name, "name": "dangling.json", "diagram": GOOD})
+        status, _ = self.call("POST", "/api/save-copy", {"dir": self.tmp.name, "name": "dangling.json", "diagram": GOOD})
         self.assertEqual(status, 200)
         self.assertTrue(dangling.is_symlink())
         self.assertEqual(len(json.loads((Path(self.tmp.name) / "nowhere.json").read_text())["nodes"]), 4)
+
+
+class StartScreenTests(ServerCase):
+    """Started without --file: no project is open until the page creates or opens one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.file = Path(self.tmp.name) / "unused.json"
+        self.server = make_server(None, port=0)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+
+    def test_nothing_is_open_and_nothing_can_be_saved(self):
+        self.assertEqual(json.loads(self.call("GET", "/api/file")[1]), {"open": False})
+        self.assertEqual(self.call("GET", "/api/diagram")[0], 409)
+        self.assertEqual(self.call("PUT", "/api/diagram", GOOD)[0], 409)
+        self.assertEqual(self.call("GET", "/")[0], 200)
+
+    def test_the_dialogs_start_in_documents_or_home(self):
+        start = json.loads(self.call("GET", "/api/browse")[1])["dir"]
+        self.assertIn(start, (str((Path.home() / "Documents").resolve()), str(Path.home().resolve())))
+
+    def test_new_then_save(self):
+        status, data = self.call("POST", "/api/new", {"dir": self.tmp.name, "name": "first"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call("PUT", "/api/diagram", GOOD)[0], 200)
+        self.assertEqual(len(json.loads((Path(self.tmp.name) / "first.json").read_text())["nodes"]), 4)

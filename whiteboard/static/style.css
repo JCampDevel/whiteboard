@@ -134,3 +134,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .rel-label { display: block; margin: 8px 0 4px; color: var(--fg); }
 #rel-text { width: 100%; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
   border-radius: 6px; padding: 6px 8px; resize: vertical; }
+#start { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: var(--bg); }
+.start-card { width: min(420px, 100%); text-align: center; }
+.start-card h1 { margin: 0; font-size: 30px; }
+.start-sub { margin: 6px 0 28px; color: var(--muted); }
+.start-buttons { display: flex; flex-direction: column; gap: 12px; }
+button.big { padding: 12px 18px; font-size: 16px; }
+#start-message { min-height: 1.4em; margin-top: 18px; color: #ef4444; }
+button.primary:disabled { opacity: .45; }

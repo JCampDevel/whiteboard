@@ -14,6 +14,18 @@
 </script>
 </head>
 <body>
+<!-- Shown when no project is open: when the app starts, and after Close project. -->
+<section id="start" hidden aria-labelledby="start-title">
+  <div class="start-card">
+    <h1 id="start-title">Whiteboard</h1>
+    <p class="start-sub">Control-structure diagrams</p>
+    <div class="start-buttons">
+      <button id="start-new" class="primary big">New project…</button>
+      <button id="start-open" class="big">Open project…</button>
+    </div>
+    <p id="start-message" role="alert"></p>
+  </div>
+</section>
 <header id="toolbar">
   <div class="group" role="radiogroup" aria-label="Tool">
     <button data-tool="select" class="tool active" title="Select, move, resize. Drag empty space to box-select. Shift/Ctrl+click adds (S)">Select</button>
@@ -37,8 +49,9 @@
     </label>
   </div>
   <div class="group">
-    <button id="save-file" title="Save the diagram to a file and folder you choose, and carry on working there (Ctrl+S)">Save as…</button>
-    <button id="open-file-btn" title="Open a diagram file (Ctrl+O)">Open…</button>
+    <button id="save-btn" class="primary" disabled title="Save the project (Ctrl+S)">Save</button>
+    <button id="save-copy" title="Save a copy of the diagram as it is now, to another file. You carry on working on this project, and saving it later doesn't change the copy (Ctrl+Shift+S)">Save copy…</button>
+    <button id="close-project" title="Close this project and go back to the start screen">Close project</button>
     <button id="theme" title="Switch between following your system, light and dark">Theme: Auto</button>
     <button id="home" title="Return the view to your diagram">Home</button>
     <button id="reset-arrow" disabled title="Let the selected arrows choose their own sides and route again">Reset arrow</button>
@@ -70,7 +83,7 @@
       <span id="fd-dir"></span>
     </div>
     <ul id="fd-list" aria-label="Folders and diagram files"></ul>
-    <label class="fd-name">File name <input id="fd-name" type="text" autocomplete="off" spellcheck="false"></label>
+    <label class="fd-name"><span id="fd-name-label">File name</span> <input id="fd-name" type="text" autocomplete="off" spellcheck="false"></label>
     <p id="fd-error" role="alert"></p>
     <div class="fd-buttons">
       <button type="button" id="fd-cancel">Cancel</button>
@@ -95,6 +108,7 @@
     <p id="ask-text"></p>
     <div class="fd-buttons">
       <button value="cancel">Cancel</button>
+      <button value="other" id="ask-other" hidden></button>
       <button value="ok" id="ask-ok" class="primary">OK</button>
     </div>
   </form>

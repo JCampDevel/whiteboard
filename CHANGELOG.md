@@ -4,6 +4,37 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.14.0, 2026-10-30: Projects: start screen, Save, Save copy, Close
+
+On branch `ProjectManagement`.
+
+Asked: a start screen to open a project or start a new one; a new project asks for a name, used as the file name; a Close project button that asks to save if needed and returns to the start screen; a Save copy button that saves a copy which later edits don't change. Agreed: saving is by hand (Save button), not automatic.
+
+**Added**
+- **Start screen** with **New project…** and **Open project…**, shown when the app opens and after closing a project.
+- **New project**: name (becomes the file name) and folder; asks before replacing an existing file; starts an empty diagram, already saved.
+- **Save** (Ctrl+S). Unsaved changes are shown by a dot after the project name (toolbar and tab), a lit Save button and "Unsaved changes"; the browser asks before closing or reloading the tab with unsaved changes.
+- **Save copy…** (Ctrl+Shift+S): saves the diagram on screen to another file and leaves the project open, so later saves don't change the copy. Won't save over the project itself.
+- **Close project**: Save / Don't save / Cancel when there are unsaved changes, then the start screen.
+- Server: `POST /api/new`, `/api/close`, `/api/save-copy`, `/api/tables` (tables of the diagram sent). `GET /api/file` says whether a project is open. With no project open, loading and saving are refused.
+
+**Changed**
+- **No more autosave.** The project file only changes when you press Save (or choose Save on closing).
+- `--file` is now optional and opens that project straight away; without it the app starts at the start screen (it used to default to `diagram.json`).
+- **Save as… and Open… are gone** from the toolbar: New / Open are on the start screen, and Save copy replaces Save as. The `/api/save-as` endpoint and `GET /api/tables` are removed.
+- The tables (and linked ids on the diagram) are worked out from the diagram on screen, saved or not, a moment after each edit.
+- A project file that can't be opened at startup now sends you to the start screen with the reason.
+- The question box can show three buttons.
+- Requirement R16 rewritten.
+
+**Docs**: REQUIREMENTS.md (R16), DESIGN.md (projects, tables, never-overwrite), README (Projects and saving), GETTING_STARTED.md (start screen, first steps, where work is saved, options, troubleshooting).
+
+**Tests**: 105 (was 99). New: no project open at start (nothing loads or saves; dialogs start in Documents or home); New project creates and opens an empty file, asks before replacing, and Save then writes it; Save copy writes a copy, leaves the project open, later saves don't change the copy, asks before replacing, refuses the project itself; Close leaves nothing open and writes nothing, and the dialogs remember the folder; tables from the diagram sent (nothing written; bad diagram refused); bad names, folders and diagrams refused for New and Save copy. Save-as tests replaced.
+
+**Not verified**: the start screen, buttons and dialogs are browser code and have not been run. Check: start the app (start screen); New project and draw (dot appears); Save (dot goes); Save copy then change and Save (copy unchanged); Close with unsaved changes: Cancel, Don't save, Save; Open project; reloading the tab with unsaved changes.
+
+---
+
 ## 0.13.1, 2026-10-30: Fixes from a full code review
 
 Three reviewers (one each for the arrows, the rest of the page, and the Python server and model) read the whole codebase; every finding was checked against the code before fixing. The Python ones were reproduced by running them; the JavaScript ones by reasoning (still no way to run it here).

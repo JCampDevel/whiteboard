@@ -159,6 +159,52 @@ class DiagramValidation(unittest.TestCase):
         self.assertEqual(d.bounds(), (10, 20, 600, 960))
 
 
+class ColoursAndShownFields(unittest.TestCase):
+    def test_auto_colour_and_hex_colours_are_accepted(self):
+        d = Diagram.from_dict({"nodes": [node("C1", colour="auto"), node("CP1", "controlled_process", colour="#ABCDEF")],
+                               "edges": [edge("A1", "C1", "CP1", colour="auto")]})
+        self.assertEqual((d.nodes[0].colour, d.nodes[1].colour, d.edges[0].colour), ("auto", "#abcdef", "auto"))
+
+    def test_defaults_work_on_light_and_dark(self):
+        d = Diagram.from_dict({"nodes": [{"id": "C1", "type": "controller", "x": 0, "y": 0, "w": 50, "h": 50},
+                                         {"id": "CP1", "type": "controlled_process", "x": 0, "y": 0, "w": 50, "h": 50}],
+                               "edges": [edge("A1", "C1", "CP1")]})
+        self.assertEqual(d.edges[0].colour, "auto")
+        self.assertEqual(d.nodes[0].colour, "#3b82f6")
+
+    def test_other_colour_words_rejected(self):
+        for bad in ("Auto", "blue", "", None, 5):
+            with self.subTest(bad=bad), self.assertRaises(DiagramError):
+                Diagram.from_dict({"nodes": [node("C1", colour=bad)]})
+
+    def test_by_default_id_and_name_are_shown(self):
+        d = Diagram.from_dict({"nodes": [node("C1"), node("CP1", "controlled_process")], "edges": [edge("A1", "C1", "CP1")]})
+        self.assertTrue(all(i.shown == ["id", "name"] for i in d.nodes + d.edges))
+
+    def test_shown_round_trips_and_is_tidied_into_table_order(self):
+        d = Diagram.from_dict({"nodes": [node("C1", shown=["outgoing", "name", "name", "control_algorithm"])]})
+        self.assertEqual(d.nodes[0].shown, ["name", "control_algorithm", "outgoing"])
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+        self.assertEqual(Diagram.from_dict({"nodes": [node("C1", shown=[])]}).nodes[0].shown, [])  # everything hidden is allowed
+
+    def test_each_type_only_allows_its_own_properties(self):
+        cp = node("CP1", "controlled_process")
+        for bad_node in (node("C1", shown=["line"]), node("C1", shown=["nope"]), node("C1", shown="id"), node("C1", shown=[1])):
+            with self.subTest(bad=bad_node["shown"]), self.assertRaises(DiagramError):
+                Diagram.from_dict({"nodes": [bad_node]})
+        with self.assertRaises(DiagramError):  # a Controlled Process has no Process Model column
+            Diagram.from_dict({"nodes": [dict(cp, shown=["process_model"])]})
+        with self.assertRaises(DiagramError):  # an arrow has no "outgoing"
+            Diagram.from_dict({"nodes": [node("C1"), cp], "edges": [edge("A1", "C1", "CP1", shown=["outgoing"])]})
+        d = Diagram.from_dict({"nodes": [node("C1"), cp], "edges": [edge("A1", "C1", "CP1", shown=["source", "target", "line"])]})
+        self.assertEqual(d.edges[0].shown, ["line", "source", "target"])
+
+    def test_table_columns_are_exactly_the_showable_properties(self):
+        for t in model.tables(Diagram()):
+            with self.subTest(t=t["key"]):
+                self.assertEqual([c["key"] for c in t["columns"]], [k for k, _ in model.FIELDS[t["key"]]])
+
+
 class Migration(unittest.TestCase):
     OLD = {
         "nodes": [node("n1", colour="#ff0000"), node("n2", "controlled_process")],
@@ -210,6 +256,12 @@ class Migration(unittest.TestCase):
             ("F1", "feedback", "CP1", "PM1"),
         ])
         self.assertEqual({n.parent for n in d.nodes if n.type in model.CHILD_TYPES}, {"C1"})
+
+    def test_the_old_near_black_arrow_default_becomes_auto(self):
+        raw = {"nodes": [node("C1"), node("CP1", "controlled_process")],
+               "edges": [edge("A1", "C1", "CP1", colour="#111827"), edge("A2", "C1", "CP1", colour="#ff0000")]}
+        d = Diagram.from_dict(model.migrate(raw))
+        self.assertEqual([e.colour for e in d.edges], ["auto", "#ff0000"])
 
     def test_migrating_twice_changes_nothing(self):
         once = model.migrate(self.OLD)

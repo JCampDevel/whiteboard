@@ -4,6 +4,67 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.5.0, 2026-10-30: Dark theme, colour chart, choose what the diagram shows
+
+**Added**
+- **Dark theme.** A Theme button cycles Auto (follow the system), Light and Dark; a forced choice is remembered and applied before the page paints. The page already followed the system's dark setting; now it can be chosen.
+- **Colour chart** replaces the browser's colour picker: 16 swatches (15 colours and Default). It colours the selected items, or the next item drawn of the active tool's type; every entity type, including the two inner boxes and both arrow types, can be coloured.
+- **Show properties on the diagram.** Every table cell has a tick box that shows or hides that property of that entity on the diagram; a tick box in each column heading does the whole column. Default: ID and name. Other properties draw as small grey lines on the box or arrow (linked ids, line style, from/to). Saved with the diagram (`shown`).
+- Colour `auto` (the theme's text colour), used as the new default for arrows.
+- `docs/REQUIREMENTS.md`: the requirements as one current list (R1 to R17).
+
+**Changed**
+- **Requirements rewritten to the new set only.** Superseded wording is gone: the old "different colours" (a picker, four types), "arrows connect a Controller or Controlled Process" and the per-version lists in DESIGN.md. DESIGN.md now points at REQUIREMENTS.md and cites R-numbers.
+- Default colours: Controller blue (#3b82f6, was #2563eb), Controlled Process green, arrows `auto` (was near-black #111827, which is invisible on dark). Arrows saved with the old default become `auto` when opened; other colours are untouched.
+- The tables panel and the diagram now refetch the tables after every save (the diagram needs them for the new lines), and keep their scroll position when they refresh.
+- Table columns now come from one list in the model (`FIELDS`), shared with the validation of which properties can be shown.
+
+**Docs**: README, docs/DESIGN.md (colours, theme, properties shown), docs/REQUIREMENTS.md (new).
+
+**Tests**: 57 (was 49), all passing: `auto` and hex colours accepted and others rejected; defaults; `shown` default, tidying, round trip, rejects properties a type doesn't have; table columns equal the showable properties for every type; old near-black arrows become `auto`.
+
+**Not verified**
+- None of the browser side has been run (no Node; Firefox won't start headless here): theme switching, the colour chart, the tick boxes and the extra lines on boxes and arrows. Things to look at in particular: text in small boxes being cut off, the colour chart opening over the diagram and closing on a click elsewhere, ticking a box in a table then seeing the diagram change without the table jumping to the top, and that nothing looks wrong in dark.
+- "Other arrows" is still there; see the answer in the conversation. It can be removed if you don't want it.
+
+---
+
+## 0.4.0, 2026-10-29: Tables dock at the bottom
+
+**Added**
+- The tables now open in a panel along the bottom of the screen, under the diagram instead of over it, and can be minimised to a bar (T, or click the bar). Drag its top edge to resize.
+- Tabs, one per entity type, with row counts.
+- Selecting something on the diagram switches to its table and highlights its row (all selected rows, for several items). Clicking an ID in a table selects that item and centres it on the diagram.
+- The panel refreshes after every autosave.
+
+**Changed**
+- Replaces the full-screen Tables view and its toolbar button. Esc no longer closes the tables; minimise with the bar or T.
+- A minimised panel does not open by itself when you click things.
+
+**Docs**: README, docs/DESIGN.md.
+
+**Tests**: none new (browser-only change; the table contents are unchanged). 49 existing tests pass.
+
+**Not verified**: not run in a browser. Check: open the panel and the diagram is still usable above it; click a Controller, then a Feedback arrow, and the tab and highlighted row follow; click an ID inside a table; minimise and reopen; drag the top edge; draw something new and see its row appear after the save.
+
+---
+
+## 0.3.2, 2026-10-29: Name box
+
+**Added**
+- A **Name** box in the toolbar sets the name of the selected Controller, Controlled Process, Control Action, Feedback (and Control Algorithm / Process Model). Updates the diagram and tables as you type. A newly drawn item focuses it so you can type straight away.
+
+**Changed**
+- Double-click now jumps to the Name box instead of opening a pop-up prompt.
+
+**Docs**: README, docs/DESIGN.md.
+
+**Tests**: none new; the server and model already stored names (`label`, max 200 characters), and this is browser-only. 49 existing tests still pass.
+
+**Not verified**: not run in a browser. Check: draw a Controller and type a name straight away; select an arrow and rename it; select two items (Name box should switch off); Delete/letter shortcuts must not fire while typing in the box.
+
+---
+
 ## 0.3.1, 2026-10-29: ID prefixes changed
 
 **Changed**

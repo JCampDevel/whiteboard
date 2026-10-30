@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Whiteboard</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+  // Apply a saved theme before the page paints, so it doesn't flash the wrong one.
+  try {
+    var t = localStorage.getItem("whiteboard-theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 </head>
 <body>
 <header id="toolbar">
@@ -17,7 +24,12 @@
     <button data-tool="feedback" class="tool" title="Drag from one rectangle to another (F)">Feedback</button>
   </div>
   <div class="group">
-    <label>Colour <input type="color" id="colour" value="#2563eb"></label>
+    <label>Name <input type="text" id="name" maxlength="200" size="22" disabled placeholder="Select one item" autocomplete="off"></label>
+    <div id="colour-group">
+      <label for="colour-btn">Colour</label>
+      <button id="colour-btn" aria-haspopup="true" aria-expanded="false" title="Colour chart: colours the selected items, or the next thing you draw"><span id="colour-swatch" class="swatch"></span></button>
+      <div id="palette" role="menu" aria-label="Colour chart" hidden></div>
+    </div>
     <label>Arrow line
       <select id="style">
         <option value="full">Full</option>
@@ -26,16 +38,23 @@
     </label>
   </div>
   <div class="group">
-    <button id="view-toggle" title="Show the entity tables, or go back to the diagram">Tables</button>
+    <button id="theme" title="Switch between following your system, light and dark">Theme: Auto</button>
     <button id="home" title="Return the view to your diagram">Home</button>
     <button id="delete" disabled title="Delete the selected item (Delete)">Delete</button>
     <span id="status" role="status">Loading…</span>
   </div>
 </header>
 <main id="scroller">
-  <section id="tables" hidden aria-label="Entity tables"></section>
   <svg id="board" xmlns="http://www.w3.org/2000/svg"><defs id="defs"></defs><g id="world"><g id="edges"></g><g id="nodes"></g><g id="handles"></g><g id="overlay"></g></g></svg>
 </main>
+<section id="dock" aria-label="Entity tables">
+  <div id="dock-grip" title="Drag to resize"></div>
+  <div id="dock-bar">
+    <button id="dock-toggle" aria-expanded="false" title="Show or hide the tables (T)">▲ Tables</button>
+    <div id="tabs" role="tablist" hidden></div>
+  </div>
+  <div id="tables" hidden></div>
+</section>
 <script src="/app.js"></script>
 </body>
 </html>

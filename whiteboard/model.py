@@ -41,7 +41,30 @@ EDGE_TYPES = ("control_action", "feedback")
 LINE_STYLES = ("full", "dashed")
 
 MIN_NODE_SIZE = 40
+AUTO_COLOUR = "auto"  # drawn in the theme's text colour, so it shows on light and dark
 _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+_OUT_ACTIONS = ("outgoing", "Outgoing control actions")
+_IN_FEEDBACK = ("incoming", "Incoming feedback")
+_OTHER = ("other", "Other arrows")
+_ARROW_FIELDS = (("id", "ID"), ("name", "Name"), ("line", "Line"), ("source", "From"), ("target", "To"))
+# Each entity type's properties, in table-column order. These are the columns of its table and
+# also the properties that can be switched on to show on the diagram.
+FIELDS = {
+    "controller": (
+        ("id", "ID"), ("name", "Name"), ("control_algorithm", "Control Algorithm"),
+        ("process_model", "Process Model"), _OUT_ACTIONS, _IN_FEEDBACK, _OTHER),
+    "control_algorithm": (
+        ("id", "ID"), ("name", "Name"), ("controller", "Controller"), _OUT_ACTIONS, _IN_FEEDBACK, _OTHER),
+    "process_model": (
+        ("id", "ID"), ("name", "Name"), ("controller", "Controller"), _OUT_ACTIONS, _IN_FEEDBACK, _OTHER),
+    "controlled_process": (
+        ("id", "ID"), ("name", "Name"), ("incoming", "Incoming control actions"),
+        ("outgoing", "Outgoing feedback"), _OTHER),
+    "control_action": _ARROW_FIELDS,
+    "feedback": _ARROW_FIELDS,
+}
+DEFAULT_SHOWN = ("id", "name")
 
 
 class DiagramError(ValueError):
@@ -57,9 +80,24 @@ def _number(value, what: str) -> float:
 
 
 def _colour(value, what: str) -> str:
+    if value == AUTO_COLOUR:
+        return value
     if not isinstance(value, str) or not _COLOUR.match(value):
-        raise DiagramError(f"{what} must be a colour like #1a2b3c")
+        raise DiagramError(f"{what} must be a colour like #1a2b3c, or {AUTO_COLOUR}")
     return value.lower()
+
+
+def _shown(value, type_: str) -> list[str]:
+    """Which of an entity's properties are drawn on the diagram (default: ID and name)."""
+    keys = [k for k, _ in FIELDS[type_]]
+    if value is None:
+        return list(DEFAULT_SHOWN)
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise DiagramError("shown must be a list of property names")
+    unknown = [v for v in value if v not in keys]
+    if unknown:
+        raise DiagramError(f"{TYPE_TITLES[type_]} has no property {unknown[0]!r}")
+    return [k for k in keys if k in value]  # tidy: table order, no repeats
 
 
 def _text(value, what: str) -> str:
@@ -97,8 +135,9 @@ class Node:
     w: float
     h: float
     label: str = ""
-    colour: str = "#2563eb"
+    colour: str = "#3b82f6"
     parent: str | None = None  # the Controller a Control Algorithm / Process Model sits in
+    shown: list[str] = field(default_factory=lambda: list(DEFAULT_SHOWN))
 
     @classmethod
     def from_dict(cls, d: dict) -> "Node":
@@ -121,8 +160,9 @@ class Node:
             w=w,
             h=h,
             label=_text(d.get("label", ""), "node label"),
-            colour=_colour(d.get("colour", "#2563eb"), "node colour"),
+            colour=_colour(d.get("colour", "#3b82f6"), "node colour"),
             parent=parent,
+            shown=_shown(d.get("shown"), d["type"]),
         )
 
 
@@ -134,10 +174,11 @@ class Edge:
     target: str
     style: str = "full"
     label: str = ""
-    colour: str = "#111827"
+    colour: str = AUTO_COLOUR
     # Fractions of the rectangle's width/height; None lets the page pick a default.
     source_anchor: list[float] | None = None
     target_anchor: list[float] | None = None
+    shown: list[str] = field(default_factory=lambda: list(DEFAULT_SHOWN))
 
     @classmethod
     def from_dict(cls, d: dict) -> "Edge":
@@ -157,9 +198,10 @@ class Edge:
             target=d["target"],
             style=d.get("style", "full"),
             label=_text(d.get("label", ""), "edge label"),
-            colour=_colour(d.get("colour", "#111827"), "edge colour"),
+            colour=_colour(d.get("colour", AUTO_COLOUR), "edge colour"),
             source_anchor=_anchor(d.get("source_anchor"), "arrow start point"),
             target_anchor=_anchor(d.get("target_anchor"), "arrow end point"),
+            shown=_shown(d.get("shown"), d["type"]),
         )
 
 
@@ -268,6 +310,11 @@ def migrate(raw):
             if item.get(key) in renamed:
                 item[key] = renamed[item[key]]
 
+    # Arrows used to default to near-black, which vanishes on the dark theme; that default is now "auto".
+    for e in edges:
+        if isinstance(e, dict) and e.get("colour") == "#111827":
+            e["colour"] = AUTO_COLOUR
+
     have = {(n.get("parent"), n.get("type")) for n in nodes if isinstance(n, dict)}
     for c in [n for n in nodes if isinstance(n, dict) and n.get("type") == "controller" and isinstance(n.get("id"), str)]:
         for child_type in CHILD_TYPES:
@@ -275,7 +322,7 @@ def migrate(raw):
                 nodes.append({
                     "id": fresh(child_type), "type": child_type, "parent": c["id"],
                     "x": c.get("x", 0), "y": c.get("y", 0), "w": 100, "h": MIN_NODE_SIZE,  # the page lays these out
-                    "label": TYPE_TITLES[child_type], "colour": c.get("colour", "#2563eb"),
+                    "label": TYPE_TITLES[child_type], "colour": c.get("colour", "#3b82f6"),
                 })
     return raw
 
@@ -324,8 +371,8 @@ def tables(diagram: Diagram) -> list[dict]:
     def sorted_nodes(type_):
         return sorted((n for n in diagram.nodes if n.type == type_), key=lambda n: _id_order(n.id))
 
-    def col(key, title):
-        return {"key": key, "title": title}
+    def columns(type_):
+        return [{"key": k, "title": t} for k, t in FIELDS[type_]]
 
     result = []
 
@@ -339,10 +386,7 @@ def tables(diagram: Diagram) -> list[dict]:
             "process_model": kids.get("process_model", ""),
             "outgoing": out, "incoming": into, "other": other,
         })
-    result.append({"key": "controller", "title": "Controller", "columns": [
-        col("id", "ID"), col("name", "Name"), col("control_algorithm", "Control Algorithm"),
-        col("process_model", "Process Model"), col("outgoing", "Outgoing control actions"),
-        col("incoming", "Incoming feedback"), col("other", "Other arrows")], "rows": rows})
+    result.append({"key": "controller", "title": "Controller", "columns": columns("controller"), "rows": rows})
 
     for type_ in CHILD_TYPES:
         rows = []
@@ -352,28 +396,21 @@ def tables(diagram: Diagram) -> list[dict]:
                 "id": n.id, "name": n.label, "controller": n.parent or "",
                 "outgoing": out, "incoming": into, "other": other,
             })
-        result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": [
-            col("id", "ID"), col("name", "Name"), col("controller", "Controller"),
-            col("outgoing", "Outgoing control actions"), col("incoming", "Incoming feedback"),
-            col("other", "Other arrows")], "rows": rows})
+        result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": columns(type_), "rows": rows})
 
     rows = []
     for n in sorted_nodes("controlled_process"):
         # A process is controlled *by* actions arriving and reports back by feedback leaving.
         out, into, other = links({n.id}, "feedback", "control_action")
         rows.append({"id": n.id, "name": n.label, "incoming": into, "outgoing": out, "other": other})
-    result.append({"key": "controlled_process", "title": "Controlled Process", "columns": [
-        col("id", "ID"), col("name", "Name"), col("incoming", "Incoming control actions"),
-        col("outgoing", "Outgoing feedback"), col("other", "Other arrows")], "rows": rows})
+    result.append({"key": "controlled_process", "title": "Controlled Process", "columns": columns("controlled_process"), "rows": rows})
 
     for type_ in EDGE_TYPES:
         rows = [
             {"id": e.id, "name": e.label, "line": e.style, "source": e.source, "target": e.target}
             for e in edges if e.type == type_
         ]
-        result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": [
-            col("id", "ID"), col("name", "Name"), col("line", "Line"),
-            col("source", "From"), col("target", "To")], "rows": rows})
+        result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": columns(type_), "rows": rows})
     return result
 
 

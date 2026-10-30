@@ -16,11 +16,24 @@ const ID_PREFIX = {
 };
 const CHILD_TYPES = ["control_algorithm", "process_model"];   // drawn inside a Controller, right half
 const CTRL_MIN = { w: 360, h: 140 };                          // a Controller never gets smaller than this
+// The colour chart. "auto" is the theme's own text colour, so it stays visible on light and dark.
+const PALETTE = [
+  ["Default (follows the theme)", "auto"], ["Red", "#ef4444"], ["Orange", "#f97316"], ["Amber", "#f59e0b"],
+  ["Yellow", "#eab308"], ["Lime", "#84cc16"], ["Green", "#22c55e"], ["Teal", "#14b8a6"],
+  ["Cyan", "#06b6d4"], ["Blue", "#3b82f6"], ["Indigo", "#6366f1"], ["Violet", "#8b5cf6"],
+  ["Purple", "#a855f7"], ["Pink", "#ec4899"], ["Rose", "#f43f5e"], ["Grey", "#6b7280"],
+];
+// Colour for the next item drawn of each type: the last one you gave that type.
+const pen = { controller: "#3b82f6", controlled_process: "#22c55e", control_action: "auto", feedback: "auto" };
+const paint = (c) => (c === "auto" ? "var(--fg)" : c);
+const DEFAULT_SHOWN = ["id", "name"];                         // what every new item shows on the diagram
+const shownOf = (item) => item.shown || DEFAULT_SHOWN;
 const DEFAULT_SIZE = { controller: { w: 360, h: 140 }, controlled_process: { w: 360, h: 100 } };
 
 const $ = (id) => document.getElementById(id);
 const board = $("board"), scroller = $("scroller"), statusEl = $("status");
-const colourEl = $("colour"), styleEl = $("style"), deleteBtn = $("delete");
+const styleEl = $("style"), deleteBtn = $("delete"), nameEl = $("name");
+const colourBtn = $("colour-btn"), swatchEl = $("colour-swatch"), paletteEl = $("palette"), themeBtn = $("theme");
 
 let diagram = { nodes: [], edges: [] };
 let tool = "select";
@@ -30,7 +43,12 @@ let drag = null;             // current mouse gesture
 let spaceDown = false;
 let saveTimer = null;
 let dirty = false;           // changes not yet saved
-let inTables = false;
+let dockOpen = false;        // tables panel at the bottom: open or minimised
+let activeTab = "controller";
+let tableData = [];          // last tables fetched from the server
+let rowOf = {};              // entity id -> its row of linked ids, from tableData
+let titleOf = {};            // entity type -> {property key: column title}, in column order
+let lastTab = null;
 
 // ---------- helpers ----------
 const el = (name, attrs = {}, parent) => {
@@ -136,13 +154,13 @@ function layoutChildren() {
 
 // ---------- drawing ----------
 function marker(colour) {
-  const id = "arrow-" + colour.slice(1);
+  const id = "arrow-" + (colour === "auto" ? "auto" : colour.slice(1));
   if (!document.getElementById(id)) {
     const m = el("marker", {
       id, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 9, markerHeight: 9,
       orient: "auto", markerUnits: "userSpaceOnUse",
     }, $("defs"));
-    el("path", { d: "M0,0 L10,5 L0,10 z", fill: colour }, m);
+    el("path", { d: "M0,0 L10,5 L0,10 z", style: `fill:${paint(colour)}` }, m);
   }
   return `url(#${id})`;
 }
@@ -152,22 +170,42 @@ function applyView() {
   board.style.backgroundPosition = `${view.x}px ${view.y}px`;
 }
 
+// Text lines for properties other than ID and name, e.g. "Outgoing control actions: A1, A2".
+function extraLines(item) {
+  const row = rowOf[item.id], titles = titleOf[item.type] || {};
+  return shownOf(item).filter(k => k !== "id" && k !== "name").map(k => {
+    const v = row ? row[k] : undefined;
+    return `${titles[k] || k}: ${(Array.isArray(v) ? v.join(", ") : v) || "—"}`;
+  });
+}
+
 function drawNode(n) {
-  const child = Boolean(n.parent), hover = drag?.hover === n.id;
+  const child = Boolean(n.parent), hover = drag?.hover === n.id, shown = shownOf(n);
   const g = el("g", {
     class: "node" + (child ? " child" : "") + (selection.has(n.id) ? " selected" : "") + (hover ? " target-ok" : ""),
     "data-id": n.id,
   }, $("nodes"));
   el("rect", {
     class: "node-rect", x: n.x, y: n.y, width: n.w, height: n.h, rx: child ? 4 : 6,
-    fill: n.colour, stroke: n.colour,
+    style: `fill:${paint(n.colour)};stroke:${paint(n.colour)}`,
   }, g);
   // Ring round the rectangle an arrow will connect to if released now.
   if (hover) el("rect", { class: "target-ring", x: n.x - 6, y: n.y - 6, width: n.w + 12, height: n.h + 12, rx: 10 }, g);
-  el("text", { class: "node-type", x: n.x + 7, y: n.y + 14 }, g).textContent = n.id;
-  // A Controller keeps its own label in the left half, clear of the inner boxes.
-  const cx = n.type === "controller" ? n.x + n.w / 4 : n.x + n.w / 2;
-  el("text", { class: "node-label" + (child ? " small" : ""), x: cx, y: n.y + n.h / 2 + 5 }, g).textContent = n.label;
+
+  // Text is clipped to the box (a Controller's to its left half, clear of the inner boxes).
+  const clip = el("clipPath", { id: "clip-" + n.id }, g);
+  el("rect", { x: n.x, y: n.y, width: n.type === "controller" ? n.w / 2 - 4 : n.w, height: n.h }, clip);
+  const clipped = { "clip-path": `url(#clip-${n.id})` };
+  if (shown.includes("id")) el("text", { class: "node-type", x: n.x + 7, y: n.y + 14, ...clipped }, g).textContent = n.id;
+
+  const lines = [];
+  if (shown.includes("name")) lines.push({ text: n.label, cls: child ? " small" : "" });
+  extraLines(n).forEach(text => lines.push({ text, cls: " extra" }));
+  const cx = n.type === "controller" ? n.x + n.w / 4 : n.x + n.w / 2, step = 15;
+  const top = n.y + n.h / 2 - ((lines.length - 1) * step) / 2 + 5;
+  lines.forEach((ln, i) => {
+    el("text", { class: "node-label" + ln.cls, x: cx, y: top + i * step, ...clipped }, g).textContent = ln.text;
+  });
 }
 
 function render() {
@@ -183,13 +221,15 @@ function render() {
     const attrs = { x1: ends.x1, y1: ends.y1, x2: ends.x2, y2: ends.y2 };
     el("line", { ...attrs, class: "edge-hit" }, g);
     el("line", {
-      ...attrs, class: "edge-line", stroke: e.colour, "stroke-width": 2.5,
+      ...attrs, class: "edge-line", style: `stroke:${paint(e.colour)}`, "stroke-width": 2.5,
       "stroke-dasharray": e.style === "dashed" ? "9 6" : "none", "marker-end": marker(e.colour),
     }, g);
-    const t = el("text", {
-      class: "edge-label", x: (ends.x1 + ends.x2) / 2, y: (ends.y1 + ends.y2) / 2 - 6,
-    }, g);
-    t.textContent = [e.id, e.label].filter(Boolean).join(" ");
+    const shown = shownOf(e), first = [shown.includes("id") ? e.id : "", shown.includes("name") ? e.label : ""].filter(Boolean).join(" ");
+    const lines = (first ? [{ text: first, cls: "" }] : []).concat(extraLines(e).map(text => ({ text, cls: " extra" })));
+    const top = (ends.y1 + ends.y2) / 2 - 6 - (lines.length - 1) * 14;
+    lines.forEach((ln, i) => {
+      el("text", { class: "edge-label" + ln.cls, x: (ends.x1 + ends.x2) / 2, y: top + i * 14 }, g).textContent = ln.text;
+    });
   }
 
   for (const n of diagram.nodes) {
@@ -215,15 +255,23 @@ function render() {
 
 function setSelection(ids) {
   selection = new Set(ids);
-  if (selection.size === 1) {
-    const item = itemById([...selection][0]);
-    if (item) {
-      colourEl.value = item.colour;
-      if (item.style) styleEl.value = item.style;
-    }
-  }
+  const item = selection.size === 1 ? itemById([...selection][0]) : null;
+  if (item && item.style) styleEl.value = item.style;
+  refreshSwatch();
+  // The Name box edits the one selected item; with none or several selected it is off.
+  nameEl.disabled = !item;
+  nameEl.value = item ? item.label : "";
   render();
+  if (dockOpen) showSelectionInTables();
 }
+
+// Type a name for the selected item; the diagram updates as you type.
+nameEl.addEventListener("input", () => {
+  const item = selection.size === 1 ? itemById([...selection][0]) : null;
+  if (item) { item.label = nameEl.value.slice(0, 200); render(); changed(); }
+});
+nameEl.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === "Escape") nameEl.blur(); });
+function editName() { if (!nameEl.disabled) { nameEl.focus(); nameEl.select(); } }
 function toggle(id) {
   const s = new Set(selection);
   s.has(id) ? s.delete(id) : s.add(id);
@@ -243,7 +291,7 @@ async function save() {
     const r = await fetch("/api/diagram", {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(diagram),
     });
-    if (r.ok) { dirty = false; setStatus("Saved"); }
+    if (r.ok) { dirty = false; setStatus("Saved"); loadTables(); }
     else setStatus("Not saved: " + ((await r.json()).error || r.status));
   } catch { setStatus("Not saved: server unreachable"); }
 }
@@ -258,6 +306,7 @@ async function load() {
     setStatus(diagram.nodes.length ? "Loaded" : "New diagram");
   } catch (err) { setStatus("Could not load: " + err.message); }
   goHome();
+  loadTables(); // the diagram can show linked ids, which come from the tables
 }
 
 // Put the top-left of the diagram near the top-left of the screen.
@@ -276,6 +325,7 @@ $("home").addEventListener("click", goHome);
 // ---------- tools ----------
 function setTool(t) {
   tool = t;
+  refreshSwatch();
   document.querySelectorAll(".tool").forEach(b => b.classList.toggle("active", b.dataset.tool === t));
   updateCursor();
 }
@@ -284,15 +334,63 @@ function updateCursor() {
   board.classList.toggle("pan", tool === "pan" || spaceDown);
   board.classList.toggle("panning", drag?.mode === "pan");
 }
-document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => {
-  showDiagram();
-  setTool(b.dataset.tool);
-}));
+document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => setTool(b.dataset.tool)));
 
-colourEl.addEventListener("input", () => {
+// ---------- colour chart ----------
+// Applies to the selected items; with nothing selected and a drawing tool active, to the next thing drawn.
+function currentColour() {
+  const first = [...selection].map(itemById).find(Boolean);
+  return first ? first.colour : pen[tool] || pen.controller;
+}
+function refreshSwatch() {
+  const c = currentColour();
+  swatchEl.style.background = paint(c);
+  paletteEl.querySelectorAll("button").forEach(b => b.classList.toggle("current", b.dataset.colour === c));
+}
+function applyColour(c) {
   const items = [...selection].map(itemById).filter(Boolean);
-  if (items.length) { items.forEach(i => { i.colour = colourEl.value; }); render(); changed(); }
+  if (items.length) {
+    items.forEach(i => { i.colour = c; pen[i.type] = c; });
+    render();
+    changed();
+  } else if (tool in pen) pen[tool] = c;
+  else setStatus("Select something, or pick a drawing tool, then choose a colour");
+  refreshSwatch();
+}
+PALETTE.forEach(([name, value]) => {
+  const b = document.createElement("button");
+  b.dataset.colour = value;
+  b.title = name;
+  b.setAttribute("role", "menuitem");
+  b.setAttribute("aria-label", name);
+  if (value === "auto") { b.className = "auto"; b.textContent = "A"; } else b.style.background = value;
+  b.addEventListener("click", () => { applyColour(value); closePalette(); });
+  paletteEl.append(b);
 });
+function closePalette() { paletteEl.hidden = true; colourBtn.setAttribute("aria-expanded", "false"); }
+colourBtn.addEventListener("click", () => {
+  paletteEl.hidden = !paletteEl.hidden;
+  colourBtn.setAttribute("aria-expanded", String(!paletteEl.hidden));
+  refreshSwatch();
+});
+document.addEventListener("mousedown", (ev) => {
+  if (!paletteEl.hidden && !ev.target.closest("#colour-group")) closePalette();
+});
+
+// ---------- theme ----------
+const THEMES = ["auto", "light", "dark"];
+function applyTheme(t) {
+  if (t === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  themeBtn.textContent = "Theme: " + t[0].toUpperCase() + t.slice(1);
+  try { t === "auto" ? localStorage.removeItem("whiteboard-theme") : localStorage.setItem("whiteboard-theme", t); } catch {}
+}
+themeBtn.addEventListener("click", () => {
+  const now = document.documentElement.dataset.theme || "auto";
+  applyTheme(THEMES[(THEMES.indexOf(now) + 1) % THEMES.length]);
+});
+applyTheme(document.documentElement.dataset.theme || "auto");
+
 styleEl.addEventListener("change", () => {
   const edges = [...selection].map(edgeById).filter(Boolean);
   if (edges.length) { edges.forEach(e => { e.style = styleEl.value; }); render(); changed(); }
@@ -317,8 +415,8 @@ deleteBtn.addEventListener("click", deleteSelected);
 
 const KEYS = { s: "select", h: "pan", c: "controller", p: "controlled_process", a: "control_action", f: "feedback" };
 document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !paletteEl.hidden) { closePalette(); return; }
   if (ev.target.matches("input, select")) return;
-  if (inTables) { if (ev.key === "Escape") showDiagram(); return; }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") {
     setSelection([...diagram.nodes, ...diagram.edges].map(i => i.id));
     return ev.preventDefault();
@@ -327,6 +425,7 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === " ") { spaceDown = true; updateCursor(); ev.preventDefault(); }
   else if (ev.key === "Delete" || ev.key === "Backspace") { deleteSelected(); ev.preventDefault(); }
   else if (ev.key === "Escape") { drag = null; $("overlay").replaceChildren(); setSelection([]); setTool("select"); }
+  else if (ev.key.toLowerCase() === "t") toggleDock();
   else if (KEYS[ev.key.toLowerCase()]) setTool(KEYS[ev.key.toLowerCase()]);
 });
 document.addEventListener("keyup", (ev) => { if (ev.key === " ") { spaceDown = false; updateCursor(); } });
@@ -341,6 +440,7 @@ board.addEventListener("wheel", (ev) => {
 // ---------- mouse ----------
 board.addEventListener("mousedown", (ev) => {
   if (ev.button !== 0 && ev.button !== 1) return;
+  if (document.activeElement === nameEl) nameEl.blur(); // we cancel the default below, so release the box ourselves
   const p = pointer(ev), n = hit(p), edgeEl = ev.target.closest(".edge");
   drag = null;
 
@@ -443,7 +543,7 @@ window.addEventListener("mousemove", (ev) => {
     el("rect", {
       x: Math.min(drag.start.x, p.x), y: Math.min(drag.start.y, p.y),
       width: Math.abs(p.x - drag.start.x), height: Math.abs(p.y - drag.start.y),
-      fill: "none", stroke: colourEl.value, "stroke-dasharray": "4 4", "stroke-width": 2,
+      fill: "none", style: `stroke:${paint(pen[tool])}`, "stroke-dasharray": "4 4", "stroke-width": 2,
     }, ov);
   } else if (drag.mode === "connect") {
     const over = hit(p), s = anchorPoint(drag.from, drag.anchor);
@@ -452,10 +552,10 @@ window.addEventListener("mousemove", (ev) => {
     render();
     ov.replaceChildren();
     el("line", {
-      x1: s.x, y1: s.y, x2: p.x, y2: p.y, stroke: colourEl.value, "stroke-width": 2.5,
+      x1: s.x, y1: s.y, x2: p.x, y2: p.y, style: `stroke:${paint(pen[tool])}`, "stroke-width": 2.5,
       "stroke-dasharray": styleEl.value === "dashed" ? "9 6" : "none",
     }, ov);
-    el("circle", { cx: s.x, cy: s.y, r: 5, fill: colourEl.value }, ov);
+    el("circle", { cx: s.x, cy: s.y, r: 5, style: `fill:${paint(pen[tool])}` }, ov);
     if (target) {
       const a = anchorPoint(target, snapAnchor(target, p));
       el("circle", { class: "attach-dot", cx: a.x, cy: a.y, r: 5 }, ov);
@@ -483,20 +583,21 @@ window.addEventListener("mouseup", (ev) => {
     }
     const n = {
       id: newId(tool), type: tool, x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h),
-      label: TYPE_NAMES[tool], colour: colourEl.value,
+      label: TYPE_NAMES[tool], colour: pen[tool], shown: [...DEFAULT_SHOWN],
     };
     diagram.nodes.push(n);
     if (tool === "controller") { // every Controller is born with its two inner boxes
       for (const type of CHILD_TYPES) {
         diagram.nodes.push({
           id: newId(type), type, parent: n.id, x: n.x, y: n.y, w: MIN_SIZE, h: MIN_SIZE,
-          label: TYPE_NAMES[type], colour: n.colour,
+          label: TYPE_NAMES[type], colour: n.colour, shown: [...DEFAULT_SHOWN],
         });
       }
     }
     setTool("select");
     setSelection([n.id]);
     changed();
+    editName();
   } else if (d.mode === "connect") {
     const to = hit(p);
     if (!to || to === d.from) {
@@ -506,51 +607,87 @@ window.addEventListener("mouseup", (ev) => {
     }
     const e = {
       id: newId(tool), type: tool, source: d.from.id, target: to.id,
-      style: styleEl.value, label: "", colour: colourEl.value,
+      style: styleEl.value, label: "", colour: pen[tool], shown: [...DEFAULT_SHOWN],
       source_anchor: d.anchor, target_anchor: snapAnchor(to, p),
     };
     diagram.edges.push(e);
     setSelection([e.id]);
     changed();
+    editName();
   }
 });
 
-board.addEventListener("dblclick", (ev) => {
-  if (tool !== "select") return;
-  const n = hit(pointer(ev)), edgeEl = ev.target.closest(".edge");
-  const item = n || (edgeEl && edgeById(edgeEl.dataset.id));
-  if (!item) return;
-  const text = prompt("Label", item.label);
-  if (text !== null) { item.label = text.slice(0, 200); render(); changed(); }
-});
+// Double-click an item to rename it.
+board.addEventListener("dblclick", (ev) => { if (tool === "select") editName(); });
 
 // ---------- tables ----------
-const tablesEl = $("tables"), viewBtn = $("view-toggle");
-viewBtn.addEventListener("click", () => (inTables ? showDiagram() : showTables()));
+// A panel under the diagram, one tab per entity type. Selecting something on the diagram
+// switches to its table and highlights its row; clicking an ID in a table selects it on the diagram.
+const dockEl = $("dock"), tablesEl = $("tables"), tabsEl = $("tabs"), dockBtn = $("dock-toggle");
+dockBtn.addEventListener("click", toggleDock);
 
-function showDiagram() {
-  inTables = false;
-  tablesEl.hidden = true;
-  viewBtn.textContent = "Tables";
+function toggleDock() { return dockOpen ? closeDock() : openDock(); }
+
+function closeDock() {
+  dockOpen = false;
+  tablesEl.hidden = tabsEl.hidden = true;
+  dockEl.classList.remove("open");
+  dockBtn.textContent = "▲ Tables";
+  dockBtn.setAttribute("aria-expanded", "false");
 }
 
-async function showTables() {
+async function openDock() {
   clearTimeout(saveTimer);
   if (dirty) await save(); // the tables are worked out from the saved file
+  if (!(await loadTables())) return;
+  dockOpen = true;
+  tablesEl.hidden = tabsEl.hidden = false;
+  dockEl.classList.add("open");
+  dockBtn.textContent = "▼ Tables";
+  dockBtn.setAttribute("aria-expanded", "true");
+  renderDock();
+  showSelectionInTables();
+}
+
+async function loadTables() {
   try {
     const r = await fetch("/api/tables");
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
-    renderTables(data.tables);
-  } catch (err) { setStatus("Could not load tables: " + err.message); return; }
-  inTables = true;
-  tablesEl.hidden = false;
-  viewBtn.textContent = "Diagram";
+    tableData = data.tables;
+  } catch (err) { setStatus("Could not load tables: " + err.message); return false; }
+  rowOf = {};
+  titleOf = {};
+  for (const t of tableData) {
+    titleOf[t.key] = Object.fromEntries(t.columns.map(c => [c.key, c.title]));
+    for (const row of t.rows) rowOf[row.id] = row;
+  }
+  if (dockOpen) renderDock();
+  render();
+  return true;
+}
+
+// Switch to the table of the item selected last, and highlight every selected row in it.
+function showSelectionInTables() {
+  const item = itemById([...selection].at(-1));
+  if (item && item.type !== activeTab && tableData.some(t => t.key === item.type)) {
+    activeTab = item.type;
+    renderDock();
+  } else highlightRows();
+}
+
+function highlightRows() {
+  tablesEl.querySelectorAll("tr.row-hl").forEach(r => r.classList.remove("row-hl"));
+  let first = null;
+  for (const id of selection) {
+    const tr = tablesEl.querySelector(`tr[data-id="${id}"]`);
+    if (tr) { tr.classList.add("row-hl"); first = first || tr; }
+  }
+  if (first) first.scrollIntoView({ block: "nearest" });
 }
 
 // Jump from a table to the item on the diagram.
 function goTo(id) {
-  showDiagram();
   const item = itemById(id);
   if (!item) return;
   const ends = item.w ? null : edgeEnds(item);
@@ -559,22 +696,23 @@ function goTo(id) {
   setSelection([id]);
 }
 
-function renderTables(tables) {
-  const h = (tag, text, cls) => {
-    const e = document.createElement(tag);
-    if (text !== undefined) e.textContent = text;
-    if (cls) e.className = cls;
-    return e;
-  };
+const html = (tag, text, cls) => {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+};
+
+function renderDock() {
   const idLink = (id) => {
-    const b = h("button", id, "link");
+    const b = html("button", id, "link");
     b.addEventListener("click", () => goTo(id));
     return b;
   };
   // Text cells (Name, Line) are shown as typed; everything else holds ids, possibly with a note like "(internal)".
   const fill = (td, key, value) => {
-    const parts = Array.isArray(value) ? value : value ? [value] : [];
     if (key === "name" || key === "line") { td.textContent = value; return; }
+    const parts = Array.isArray(value) ? value : value ? [value] : [];
     parts.forEach((part, i) => {
       if (i) td.append(", ");
       const [id, ...note] = part.split(" ");
@@ -583,28 +721,99 @@ function renderTables(tables) {
     });
   };
 
-  tablesEl.replaceChildren(h("p", "Click an ID to find it on the diagram.", "hint"));
-  for (const t of tables) {
-    const section = h("section"), wrap = h("div", undefined, "table-wrap");
-    section.append(h("h2", `${t.title} (${t.rows.length})`));
-    if (!t.rows.length) section.append(h("p", "None drawn yet.", "hint"));
-    else {
-      const table = h("table"), thead = h("thead"), head = h("tr");
-      t.columns.forEach(c => head.append(h("th", c.title)));
-      thead.append(head);
-      table.append(thead);
-      const body = h("tbody");
-      for (const row of t.rows) {
-        const tr = h("tr");
-        t.columns.forEach(c => { const td = h("td"); fill(td, c.key, row[c.key]); tr.append(td); });
-        body.append(tr);
-      }
-      table.append(body);
-      wrap.append(table);
-      section.append(wrap);
-    }
-    tablesEl.append(section);
+  tabsEl.replaceChildren(...tableData.map(t => {
+    const b = html("button", `${t.title} (${t.rows.length})`, t.key === activeTab ? "active" : "");
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(t.key === activeTab));
+    b.addEventListener("click", () => { activeTab = t.key; renderDock(); });
+    return b;
+  }));
+
+  const t = tableData.find(x => x.key === activeTab) || tableData[0];
+  if (!t) return;
+  const keepScroll = lastTab === t.key ? tablesEl.scrollTop : 0; // a refresh must not jump back to the top
+  lastTab = t.key;
+  tablesEl.replaceChildren(html("h2", t.title));
+  if (!t.rows.length) {
+    tablesEl.append(html("p", `No ${t.title} drawn yet.`, "hint"));
+    return;
   }
+  tablesEl.append(html("p", "Tick a box to show that property of that item on the diagram.", "hint"));
+
+  const items = t.rows.map(r => itemById(r.id)).filter(Boolean);
+  const headerTicks = [];
+  const syncHeaderTicks = () => headerTicks.forEach(({ cb, key }) => {
+    const on = items.filter(i => shownOf(i).includes(key)).length;
+    cb.checked = on === items.length;
+    cb.indeterminate = on > 0 && on < items.length;
+  });
+
+  const wrap = html("div", undefined, "table-wrap"), table = html("table"), thead = html("thead"), head = html("tr");
+  t.columns.forEach(c => {
+    // The header box ticks or clears the whole column.
+    const th = html("th"), label = html("label"), cb = tickBox(`Show ${c.title} for every ${t.title} on the diagram`);
+    cb.addEventListener("change", () => { setShown(items, c.key, cb.checked); renderDock(); });
+    headerTicks.push({ cb, key: c.key });
+    label.append(cb, c.title);
+    th.append(label);
+    head.append(th);
+  });
+  thead.append(head);
+  const body = html("tbody");
+  for (const row of t.rows) {
+    const tr = html("tr"), item = itemById(row.id);
+    tr.dataset.id = row.id;
+    t.columns.forEach(c => {
+      const td = html("td");
+      if (item) {
+        const cb = tickBox(`Show ${c.title} of ${row.id} on the diagram`);
+        cb.checked = shownOf(item).includes(c.key);
+        cb.addEventListener("change", () => { setShown([item], c.key, cb.checked); syncHeaderTicks(); });
+        td.append(cb);
+      }
+      fill(td, c.key, row[c.key]);
+      tr.append(td);
+    });
+    body.append(tr);
+  }
+  table.append(thead, body);
+  wrap.append(table);
+  tablesEl.append(wrap);
+  syncHeaderTicks();
+  tablesEl.scrollTop = keepScroll;
+  highlightRows();
 }
+
+function tickBox(description) {
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "tick";
+  cb.title = description;
+  cb.setAttribute("aria-label", description);
+  return cb;
+}
+
+// Show or hide one property on the diagram for some items; kept in the table's column order.
+function setShown(items, key, on) {
+  for (const item of items) {
+    const keys = new Set(shownOf(item));
+    on ? keys.add(key) : keys.delete(key);
+    item.shown = Object.keys(titleOf[item.type]).filter(k => keys.has(k));
+  }
+  render();
+  changed();
+}
+
+// Drag the top edge of the panel to resize it.
+$("dock-grip").addEventListener("mousedown", (ev) => {
+  const startY = ev.clientY, startH = tablesEl.offsetHeight;
+  const move = (e) => {
+    tablesEl.style.height = Math.max(100, Math.min(window.innerHeight - 260, startH + startY - e.clientY)) + "px";
+  };
+  const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+  ev.preventDefault();
+});
 
 load();

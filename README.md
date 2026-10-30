@@ -5,8 +5,8 @@ Draw control-structure diagrams in your browser. No installs: Python 3 standard 
 **New here?** [GETTING_STARTED.md](GETTING_STARTED.md) shows how to get the project and run it, step by step.
 
 ```
-python3 -m whiteboard                      # opens http://127.0.0.1:8000, saves to ./diagram.json
-python3 -m whiteboard --file my.json --port 9000 --no-browser
+python3 -m whiteboard                      # opens http://127.0.0.1:8000 at the start screen
+python3 -m whiteboard --file my.json --port 9000 --no-browser   # straight into a project
 ```
 
 ## What you can draw
@@ -53,7 +53,7 @@ The **Tables** bar sits along the bottom of the screen (press T, or click it, to
 - **Hide an arrow:** untick **On diagram** in the arrow's row (Control Action and Feedback tables; the box in the heading does the whole table), or select the arrow and click **Hide arrow** in the toolbar. A hidden arrow isn't drawn or selectable but stays in the tables with its links. **Unhide arrows (n)** in the toolbar brings them all back.
 - **Show on the diagram:** every table cell has a tick box. Tick it to show that property of that entity on the diagram, untick to hide it; the tick box in a column heading ticks or clears the whole column. By default each entity shows its ID and name; a new item's name starts as its type ("Controller", "Feedback" and so on), for you to change. Other properties appear as smaller grey lines (for example "Outgoing control actions: A1, A2" in a Controller, or "From: C1" on an arrow). Text is cut off at the edge of its box, so make a box bigger to see a long list. These lines can lag an edit by a moment.
 - **Table to diagram:** click any ID in a table to select that item and centre it on the diagram (and show its own table, if you clicked a link to a different type).
-- The panel refreshes itself after each autosave.
+- The panel keeps up with the diagram as you edit, saved or not.
 
 | Table | Columns |
 |---|---|
@@ -68,16 +68,18 @@ A Controller's row also counts arrows on its own Control Algorithm and Process M
 
 Files from earlier versions are upgraded when opened: items get IDs with the current prefixes (n1 becomes C1, an old ALG1 becomes CA1, an old CA1 or FB1 becomes A1 or F1, and so on) and every Controller gets its two inner boxes. The file on disk changes the next time you edit.
 
-## Saving and opening
+## Projects and saving
 
-The name of the file you are working on is shown in the toolbar. Every change is saved to it automatically a moment later (the status beside it says **Saved**). When the app starts, that is `diagram.json` in the folder you started it from, or the file you gave with `--file`.
+Each diagram is a **project**, saved as one file.
 
-- **Save as…** (Ctrl+S) opens a Save dialog: pick a folder (click a folder to go into it, **↑ Up** to go back, **Home folder** to start from your home folder), type a file name (`.json` is added if you leave it off) and click **Save**. If the file already exists you are asked before it is replaced. From then on you are working on the new file and changes save there; the old file is left as it was.
-- **Open…** (Ctrl+O) opens the same dialog: pick a diagram file (click it, then **Open**, or double-click it). You are asked "Any unsaved changes will be lost": **Open** opens it, **Cancel** stops and nothing changes. From then on you are working on that file. Files from older versions of the app are upgraded as they open; a file that isn't a diagram is refused, with the reason, and nothing changes.
+- **Start screen:** when the app opens you choose **New project…** or **Open project…**.
+  - **New project:** type a name for the project (it becomes the file name, with `.json` added), pick a folder (click a folder to go into it, **↑ Up** to go back, **Home folder** to start from your home folder) and click **Create**. If a file with that name is already there you're asked before it is replaced. You then start with an empty diagram.
+  - **Open project:** pick a diagram file (click it, then **Open**, or double-click it). Files from older versions of the app are upgraded as they open; a file that isn't a diagram is refused, with the reason, and nothing changes.
+- **Save** (Ctrl+S): nothing is written to the file until you save. While there are unsaved changes, the project's name in the toolbar and the browser tab has a dot after it, and the status says **Unsaved changes**. If you close or reload the tab with unsaved changes, the browser asks first.
+- **Save copy…** (Ctrl+Shift+S): saves the diagram as it is now to another file (it suggests "*name* copy"). You carry on working on your project, and saving it later doesn't change the copy. Use it to keep a snapshot, for example before a big change.
+- **Close project:** if there are unsaved changes, asks **Save**, **Don't save** or **Cancel**, then goes back to the start screen.
 
-Because the app saves as you go, there are normally no unsaved changes; only an edit made in the last half second, or one that couldn't be saved (the status would say so), is ever lost.
-
-Files are plain, indented JSON, one field per line, starting with `"format": "whiteboard-diagram"`, so you can read them, compare versions, keep them in git or edit them in a text editor. If you edit one by hand and make a mistake, Open… tells you what is wrong rather than loading it.
+Files are plain, indented JSON, one field per line, starting with `"format": "whiteboard-diagram"`, so you can read them, compare versions, keep them in git or edit them in a text editor. If you edit one by hand and make a mistake, Open tells you what is wrong rather than loading it.
 
 ## Tests
 

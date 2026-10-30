@@ -49,7 +49,6 @@ let selection = new Set();   // ids of selected rectangles and arrows
 let view = { x: 0, y: 0 };   // where the world origin sits on screen (panning)
 let drag = null;             // current mouse gesture
 let spaceDown = false;
-let saveTimer = null;
 let floating = {};           // arrow id -> {source, target}: where its free-floating ends sit this redraw
 let lastArrow = "control_action"; // the kind of arrow drawn by dragging out of a connection point
 let dirty = false;           // changes not yet saved
@@ -415,38 +414,100 @@ function toggle(id) {
 
 // ---------- saving ----------
 function setStatus(text) { statusEl.textContent = text; statusEl.title = text; }
+// Nothing is written to the project file until you press Save. Every edit calls changed().
 let changes = 0; // counts edits, so a save that finishes after a newer edit doesn't mark that edit saved
 function changed() {
   changes++;
   dirty = true;
-  setStatus("Unsaved…");
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 400);
+  showFileName();
+  setStatus("Unsaved changes");
+  scheduleTables();
 }
+
+// Write the diagram to the project file. Resolves true if it was saved.
 async function save() {
+  if (!currentFile) return false;
   const sent = changes;
   try {
-    // The server refuses it if the file being worked on has changed since (Open / Save as in between).
-    const headers = currentFile ? { "X-Whiteboard-File": encodeURIComponent(currentFile.path) } : {};
+    // The server refuses it if this isn't the project it has open any more.
+    const headers = { "X-Whiteboard-File": encodeURIComponent(currentFile.path) };
     const r = await api("/api/diagram", { method: "PUT", headers, body: JSON.stringify(diagram) });
-    if (r.ok && sent === changes) { dirty = false; setStatus("Saved"); }
-    if (r.ok) await loadTables();
-    else setStatus("Not saved: " + ((await r.json()).error || r.status));
-  } catch { setStatus("Not saved: server unreachable"); }
+    if (!r.ok) { setStatus("Not saved: " + ((await r.json()).error || r.status)); return false; }
+    if (sent === changes) { dirty = false; setStatus(`Saved ${currentFile.name}`); }
+    showFileName();
+    return true;
+  } catch {
+    setStatus("Not saved: the app's server can't be reached. Is it still running?");
+    return false;
+  }
 }
+$("save-btn").addEventListener("click", () => save());
+// Closing or reloading the tab with unsaved changes: the browser asks first.
+window.addEventListener("beforeunload", (ev) => { if (dirty && currentFile) { ev.preventDefault(); ev.returnValue = ""; } });
+
+// Start with the project the app was started with (--file), or show the start screen.
+async function startup() {
+  try {
+    const r = await api("/api/file");
+    const info = await r.json();
+    if (r.ok && info.open) { currentFile = info; await load(); return; }
+  } catch { showStart("The app's server can't be reached. Is it still running?"); return; }
+  showStart();
+}
+
+// Load the open project from the server (used at startup).
 async function load() {
-  refreshFileInfo();
   try {
     const r = await api("/api/diagram");
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
-    diagram = data;
-    diagram.relationships = diagram.relationships || []; // files from before 0.13 have none
-    layoutChildren();
-    setStatus(diagram.nodes.length ? "Loaded" : "New diagram");
-  } catch (err) { setStatus("Could not load: " + err.message); }
+    enterProject(currentFile, data, `Opened ${currentFile.name}`);
+  } catch (err) {
+    const name = currentFile ? currentFile.name : "The project";
+    await closeOnServer();
+    showStart(`${name} couldn't be opened: ${err.message}`);
+  }
+}
+
+// Show a project that has just been created or opened.
+function enterProject(file, data, message) {
+  currentFile = file;
+  diagram = data;
+  diagram.relationships = diagram.relationships || []; // files from before 0.13 have none
+  layoutChildren();
+  dirty = false;
+  changes = 0;
+  editing = null;
+  selection = new Set();
+  startEl.hidden = true;
+  showFileName();
   goHome();
   loadTables(); // the diagram can show linked ids, which come from the tables
+  setStatus(message);
+}
+
+// The start screen: no project open. Everything from the last project is cleared away.
+function showStart(message = "") {
+  currentFile = null;
+  diagram = { nodes: [], edges: [], relationships: [] };
+  dirty = false;
+  changes = 0;
+  editing = null;
+  selection = new Set();
+  drag = null;
+  tableData = [];
+  rowOf = {};
+  if (dockOpen) closeDock();
+  render();
+  showFileName();
+  setStatus("");
+  $("start-message").textContent = message;
+  startEl.hidden = false;
+  $("start-new").focus();
+}
+
+async function closeOnServer() {
+  try { await api("/api/close", { method: "POST", body: "{}" }); } catch { /* nothing to undo */ }
 }
 
 // Put the top-left of the diagram near the top-left of the screen.
@@ -569,10 +630,14 @@ resetBtn.addEventListener("click", () => {
 
 const KEYS = { s: "select", h: "pan", c: "controller", p: "controlled_process", a: "control_action", f: "feedback" };
 document.addEventListener("keydown", (ev) => {
-  if (document.querySelector("dialog[open]")) return; // a Save / Open / question box has the keyboard
+  if (document.querySelector("dialog[open]")) return; // a file dialog or question box has the keyboard
+  if (!currentFile) return; // the start screen is showing
   if (ev.key === "Escape" && !paletteEl.hidden) { closePalette(); return; }
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "s") { ev.preventDefault(); openFileDialog("save"); return; }
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "o") { ev.preventDefault(); openFileDialog("open"); return; }
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === "s") {
+    ev.preventDefault();
+    if (ev.shiftKey) openFileDialog("copy"); else save();
+    return;
+  }
   if (ev.target.matches("input, select")) return;
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a") {
     setSelection([...diagram.nodes, ...diagram.edges.filter(e => !e.hidden)].map(i => i.id));
@@ -833,42 +898,59 @@ board.addEventListener("dblclick", (ev) => {
   if (id) editNameInTable(id);
 });
 
-// ---------- Save as / Open ----------
-// The diagram autosaves to the file being worked on. Save as saves it to a file and folder you choose and
-// carries on there; Open switches to another file. Both use this page's own dialog (not every browser can
-// show a real one), which lists folders through the app's server. Files are indented JSON.
+// ---------- projects: New, Open, Save copy, Close ----------
+// A project is one diagram file. The start screen offers New and Open; in a project, Save writes it, Save copy
+// writes a copy elsewhere (the project stays open, so later saves don't touch the copy), and Close goes back
+// to the start screen, asking to save first if there are unsaved changes. All three file jobs share one
+// dialog of this page's own (not every browser can show a real one), which lists folders via the server.
+const startEl = $("start");
 const fileDialog = $("file-dialog"), fdList = $("fd-list"), fdName = $("fd-name"), fdDir = $("fd-dir");
 const fdError = $("fd-error"), fdOk = $("fd-ok"), fdUp = $("fd-up"), askDialog = $("ask-dialog"), askOk = $("ask-ok");
-let currentFile = null; // {path, name, dir} of the file being worked on
-let fd = null;          // the file dialog while it is open: {mode: "save" | "open", dir, parent, home}
+let currentFile = null; // {path, name, dir} of the open project; null on the start screen
+let fd = null;          // the file dialog while it is open: {mode: "new" | "open" | "copy", dir, parent, home}
 let fdBusy = false;
-$("save-file").addEventListener("click", () => openFileDialog("save"));
-$("open-file-btn").addEventListener("click", () => openFileDialog("open"));
+$("start-new").addEventListener("click", () => openFileDialog("new"));
+$("start-open").addEventListener("click", () => openFileDialog("open"));
+$("save-copy").addEventListener("click", () => openFileDialog("copy"));
+$("close-project").addEventListener("click", () => closeProject());
 
-async function refreshFileInfo() {
-  try {
-    const r = await api("/api/file");
-    if (r.ok) { currentFile = await r.json(); showFileName(); }
-  } catch { /* the status already says if the server can't be reached */ }
-}
+// The project's name in the toolbar and the tab, with a dot while there are unsaved changes.
 function showFileName() {
   const label = $("file-name");
-  label.textContent = currentFile ? currentFile.name : "";
-  label.title = currentFile ? `Working on ${currentFile.path}` : "";
-  document.title = currentFile ? `${currentFile.name} – Whiteboard` : "Whiteboard";
+  label.textContent = currentFile ? currentFile.name + (dirty ? " •" : "") : "";
+  label.title = currentFile ? `${currentFile.path}${dirty ? " (unsaved changes)" : ""}` : "";
+  document.title = currentFile ? `${dirty ? "• " : ""}${currentFile.name} – Whiteboard` : "Whiteboard";
+  $("save-btn").disabled = !currentFile || !dirty;
 }
 
+async function closeProject() {
+  if (!currentFile) return;
+  if (dirty) {
+    const choice = await choose(`Save changes to ${currentFile.name} before closing?`, "Save", "Don't save");
+    if (choice === "cancel") return;
+    if (choice === "ok" && !(await save())) return; // couldn't save: stay put; the status says why
+  }
+  await closeOnServer();
+  showStart();
+}
+
+const FD_TEXT = {
+  new: { title: "New project", label: "Project name", ok: "Create" },
+  open: { title: "Open project", label: "File name", ok: "Open" },
+  copy: { title: "Save a copy", label: "Name of the copy", ok: "Save copy" },
+};
 function openFileDialog(mode) {
-  if (fileDialog.open) return;
+  if (fileDialog.open || (mode === "copy" && !currentFile)) return;
   fd = { mode };
-  $("fd-title").textContent = mode === "save" ? "Save as" : "Open";
-  fdOk.textContent = mode === "save" ? "Save" : "Open";
-  fdName.value = mode === "save" && currentFile ? currentFile.name : "";
+  $("fd-title").textContent = FD_TEXT[mode].title;
+  $("fd-name-label").textContent = FD_TEXT[mode].label;
+  fdOk.textContent = FD_TEXT[mode].ok;
+  fdName.value = mode === "copy" ? currentFile.name.replace(/\.json$/i, "") + " copy" : "";
   fdError.textContent = "";
   fileDialog.showModal();
   fdName.focus();
   fdName.select();
-  showFolder(currentFile ? currentFile.dir : "");
+  showFolder(currentFile ? currentFile.dir : ""); // otherwise the server starts in the last folder used
 }
 
 async function showFolder(dir) {
@@ -912,61 +994,67 @@ $("fd-form").addEventListener("submit", (ev) => { ev.preventDefault(); submitFil
 async function submitFileDialog() {
   if (fdBusy || !fd) return;
   const name = fdName.value.trim();
-  if (!name) { fdError.textContent = "Type a file name, or pick a file from the list."; return; }
+  if (!name) { fdError.textContent = fd.mode === "new" ? "Give the project a name." : "Type a file name, or pick a file from the list."; return; }
   fdBusy = true;
   try {
-    if (fd.mode === "save") await saveAs(name, false);
-    else await openFile(name);
+    if (fd.mode === "new") await createProject(name, false);
+    else if (fd.mode === "open") await openProject(name);
+    else await saveCopy(name, false);
   } catch { fdError.textContent = "The app's server can't be reached. Is it still running?"; }
   finally { fdBusy = false; }
 }
 
-async function saveAs(name, overwrite) {
-  const r = await api("/api/save-as", { method: "POST", body: JSON.stringify({ dir: fd.dir, name, overwrite, diagram }) });
+// POST to the server; if the file is already there, ask before replacing it.
+async function writeFile(path, body, replaceQuestion) {
+  const r = await api(path, { method: "POST", body: JSON.stringify(body) });
   const data = await r.json();
   if (r.status === 409 && data.exists) {
-    if (await ask(`${data.name} already exists in this folder.\nDo you want to replace it?`, "Replace")) return saveAs(name, true);
-    return;
+    if (await ask(replaceQuestion(data.name), "Replace")) return writeFile(path, { ...body, overwrite: true }, replaceQuestion);
+    return null;
   }
-  if (!r.ok) { fdError.textContent = data.error; return; }
-  clearTimeout(saveTimer); // everything on screen is now in the new file
-  dirty = false;
-  currentFile = data.file;
-  showFileName();
-  fileDialog.close();
-  setStatus(`Saved as ${data.file.name}`);
+  if (!r.ok) { fdError.textContent = data.error; return null; }
+  return data;
 }
 
-async function openFile(name) {
-  if (!(await ask(`Open ${name}?\nAny unsaved changes will be lost.`, "Open"))) {
-    fileDialog.close(); // Cancel cancels the whole thing
-    return;
-  }
+async function createProject(name) {
+  const data = await writeFile("/api/new", { dir: fd.dir, name },
+    (file) => `${file} already exists in this folder.\nReplace it with a new, empty project?`);
+  if (!data) return;
+  fileDialog.close();
+  enterProject(data.file, data.diagram, `New project ${data.file.name}`);
+}
+
+async function openProject(name) {
   const r = await api("/api/open", { method: "POST", body: JSON.stringify({ dir: fd.dir, name }) });
   const data = await r.json();
   if (!r.ok) { fdError.textContent = data.error; return; } // nothing has changed; pick another file
-  clearTimeout(saveTimer); // anything not yet autosaved is dropped, as the question said
-  dirty = false;
-  editing = null;
-  currentFile = data.file;
-  showFileName();
   fileDialog.close();
-  selection = new Set();
-  await load();
-  setStatus(`Opened ${data.file.name}`);
+  enterProject(data.file, data.diagram, `Opened ${data.file.name}`);
 }
 
-// A question with two buttons: resolves true for the OK button (labelled okLabel), false for Cancel or Esc.
-function ask(message, okLabel) {
+async function saveCopy(name) {
+  const data = await writeFile("/api/save-copy", { dir: fd.dir, name, diagram },
+    (file) => `${file} already exists in this folder.\nDo you want to replace it?`);
+  if (!data) return;
+  fileDialog.close();
+  setStatus(`Saved a copy as ${data.file.name}. You're still working on ${currentFile.name}.`);
+}
+
+// A question: resolves "ok" for the main button (okLabel), "other" for an optional middle one (otherLabel,
+// e.g. "Don't save"), and "cancel" for Cancel or Esc.
+function choose(message, okLabel, otherLabel = "") {
   return new Promise((resolve) => {
     $("ask-text").textContent = message;
     askOk.textContent = okLabel;
+    $("ask-other").textContent = otherLabel;
+    $("ask-other").hidden = !otherLabel;
     askDialog.returnValue = "";
-    askDialog.addEventListener("close", () => resolve(askDialog.returnValue === "ok"), { once: true });
+    askDialog.addEventListener("close", () => resolve(askDialog.returnValue || "cancel"), { once: true });
     askDialog.showModal();
     askOk.focus();
   });
 }
+const ask = async (message, okLabel) => (await choose(message, okLabel)) === "ok";
 
 // ---------- relationships ----------
 // Two or more arrows the user says are related (say a Control Action and the Feedback that reports its result),
@@ -1043,8 +1131,6 @@ function closeDock() {
 }
 
 async function openDock() {
-  clearTimeout(saveTimer);
-  if (dirty) await save(); // the tables are worked out from the saved file
   if (!(await loadTables())) return;
   dockOpen = true;
   tablesEl.hidden = tabsEl.hidden = false;
@@ -1055,13 +1141,20 @@ async function openDock() {
   showSelectionInTables();
 }
 
+// The tables are worked out by the server from the diagram on screen (saved or not), shortly after each edit.
+let tablesTimer = null, tablesAsked = 0;
+function scheduleTables() { clearTimeout(tablesTimer); tablesTimer = setTimeout(loadTables, 250); }
 async function loadTables() {
+  clearTimeout(tablesTimer);
+  const asked = ++tablesAsked;
+  let data;
   try {
-    const r = await api("/api/tables");
-    const data = await r.json();
+    const r = await api("/api/tables", { method: "POST", body: JSON.stringify(diagram) });
+    data = await r.json();
     if (!r.ok) throw new Error(data.error);
-    tableData = data.tables;
-  } catch (err) { setStatus("Could not load tables: " + err.message); return false; }
+  } catch (err) { setStatus("Could not work out the tables: " + err.message); return false; }
+  if (asked !== tablesAsked || !currentFile) return true; // a newer request is on its way (or the project closed)
+  tableData = data.tables;
   rowOf = {};
   titleOf = {};
   for (const t of tableData) {
@@ -1344,7 +1437,7 @@ function textInput(item, key) {
 async function editNameInTable(id) {
   if (!itemById(id)) return;
   if (!dockOpen) await openDock();
-  else if (dirty) { clearTimeout(saveTimer); await save(); } // a brand new item is only in the tables once saved
+  else await loadTables(); // so a brand new item already has its row
   if (!dockOpen) return;
   setSelection([id]); // switches to its table and highlights the row
   startEditing(id, "name");
@@ -1391,4 +1484,4 @@ $("dock-grip").addEventListener("mousedown", (ev) => {
   ev.preventDefault();
 });
 
-load();
+startup();

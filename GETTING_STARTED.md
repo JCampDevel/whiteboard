@@ -52,35 +52,37 @@ python3 -m whiteboard
 You should see something like:
 
 ```
-Whiteboard on http://127.0.0.1:8000/  (saving to /home/you/whiteboard/diagram.json)  Ctrl+C to stop
+Whiteboard on http://127.0.0.1:8000/  Ctrl+C to stop
 ```
 
-and a browser tab opens with an empty whiteboard. If no tab opens, copy the address (`http://127.0.0.1:8000/`) into your browser.
+and a browser tab opens at the start screen, which offers **New project…** and **Open project…**. If no tab opens, copy the address (`http://127.0.0.1:8000/`) into your browser.
 
 Run the command from the project folder (the one containing `README.md`), not from inside the inner `whiteboard` folder, or Python won't find the app.
 
-Leave the terminal open while you work: closing it, or pressing **Ctrl+C** in it, stops the whiteboard. Your work is already saved.
+Leave the terminal open while you work: closing it, or pressing **Ctrl+C** in it, stops the whiteboard. Save your work first (see below).
 
 ## 3. Try it
 
+1. On the start screen click **New project…**, type a name such as `My first diagram`, and click **Create**.
 1. Click **Controller** in the toolbar, then click on the canvas. A Controller appears, with its Control Algorithm and Process Model inside.
 2. Click **Controlled Process** and click somewhere below it.
 3. Hover over the Controller: small circles appear on its edges. Drag from one onto the Controlled Process to draw a Control Action.
 4. Click **▲ Tables** at the bottom to see the tables. Double-click a name to change it.
+5. Click **Save** (or press Ctrl+S). Then **Close project** takes you back to the start screen, where **Open project…** opens it again.
 
 The [README](README.md) covers everything else: Feedback arrows, moving and editing arrows, colours, the dark theme, choosing what the diagram shows, and saving copies.
 
 ## Where your work is saved
 
-The toolbar shows the name of the file you are working on. The diagram saves itself to it a moment after every change; the status beside the name says **Saved**. When you start the app it works on `diagram.json` in the folder you started it from, so next time you start it from the same folder, your diagram is there.
+Each diagram is a project, saved as one file: `My first diagram.json` in the folder you chose when you created it. The project's name is shown in the toolbar.
 
-To work on a different diagram:
+**Your changes are only saved when you click Save** (or press Ctrl+S). Until then the project's name has a dot after it and the status says **Unsaved changes**. If you click **Close project** or close the browser tab with unsaved changes, you are asked first.
 
-- **Save as…** in the toolbar saves the diagram under a name and folder you choose, and carries on working there.
-- **Open…** opens another diagram file and carries on working there.
-- Or start the app on a particular file: `python3 -m whiteboard --file pump-system.json` (created when you first draw something).
+**Save copy…** saves the diagram as it is now under another name, for example a snapshot before a big change. You carry on working on your project; saving it later doesn't change the copy.
 
-Diagram files are plain JSON: you can read them in a text editor or keep them in git. `diagram.json` is listed in `.gitignore`, so your own diagram in the project folder won't be committed by accident.
+You can also start the app straight into a project, skipping the start screen: `python3 -m whiteboard --file pump-system.json` (created if it doesn't exist).
+
+Diagram files are plain JSON: you can read them in a text editor or keep them in git. If you keep projects inside this project's folder, note that only `diagram.json` is in `.gitignore`.
 
 ## Options
 
@@ -90,7 +92,7 @@ python3 -m whiteboard --help
 
 | Option | What it does |
 |---|---|
-| `--file NAME.json` | Save to (and open) this file instead of `diagram.json`. |
+| `--file NAME.json` | Go straight into this project instead of the start screen (the file is created if it doesn't exist). |
 | `--port 9000` | Use a different port, if 8000 is already in use. |
 | `--no-browser` | Don't open a browser tab; go to the address yourself. |
 
@@ -102,7 +104,7 @@ From the project folder:
 git pull
 ```
 
-Then stop the app (Ctrl+C) and start it again. Diagrams made with older versions open and are upgraded automatically; it's still a good idea to **Save as…** a copy first.
+Then stop the app (Ctrl+C) and start it again. Diagrams made with older versions open and are upgraded automatically; it's still a good idea to **Save copy…** first.
 
 ## Running the tests
 
@@ -120,7 +122,7 @@ The tests use temporary files and a random port only; they never touch your diag
 | `No module named whiteboard` | You are in the wrong folder. `cd` into the project folder, the one containing `README.md`. |
 | `Address already in use` | Something else (perhaps another copy of the whiteboard) is using port 8000. Stop it, or start with `--port 9000`. |
 | The browser shows "This site can't be reached" | The app isn't running. Check the terminal: start it again, and look for an error message. |
-| Status says **Could not load** | The diagram file is damaged or isn't a whiteboard diagram. The message says what is wrong. Fix the file, or start with a different `--file`. |
-| The Save / Open dialog says the server can't be reached | Same as below: the app has stopped. Start it again. |
-| Status says **Not saved: server unreachable** | The terminal running the app was closed or stopped. Start it again; then make any small change so it saves. |
+| Open project, or the start screen, says a file **can't be opened** | The file is damaged or isn't a whiteboard diagram. The message says what is wrong. Fix the file, or open another one. |
+| The New / Open / Save copy dialog says the server can't be reached | Same as below: the app has stopped. Start it again. |
+| Status says **Not saved: the app's server can't be reached** | The terminal running the app was closed or stopped. Don't close the tab: start the app again with `--file` and the same project, then click Save in the tab you still have open. |
 | The page looks old after `git pull` | Restart the app, then reload the page. |

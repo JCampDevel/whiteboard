@@ -1,8 +1,9 @@
-"""Tiny local web server: serves the page, and loads and saves the diagram file it is working on.
+"""Tiny local web server: serves the page, and creates, opens, saves and closes project files.
 
-The file being worked on can change: Save as and Open switch to another file, as in a desktop app.
-To let the page offer its own Save and Open dialogs (browsers can't show real ones everywhere), the
-server can also list folders and save to or open a file the user picks.
+A project is one diagram file. The page starts with no project open (a start screen) unless one was
+named on the command line; New and Open choose one, Save writes it, Close puts the page back to the
+start screen. To let the page offer its own file dialogs (browsers can't show real ones everywhere),
+the server can also list folders and write a copy to a file the user picks.
 
 Because that reaches the user's files, the server answers only requests addressed to it on this
 machine (127.0.0.1 / localhost, which stops DNS-rebinding tricks) and, for anything under /api/,
@@ -104,11 +105,19 @@ def target_path(directory, name) -> Path:
     return (folder.resolve() / name).resolve()
 
 
-def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
-    # The file being worked on (Save as / Open change it), and why it couldn't be read, if it couldn't:
-    # then autosave refuses to write, so a file this app can't open is never replaced by an empty diagram.
-    state = {"file": Path(diagram_file).resolve(), "load_error": None}
-    lock = threading.Lock()  # one read or write of the working file at a time
+def default_folder() -> Path:
+    """Where the New / Open dialogs start when nothing has been opened yet: Documents, if there is one."""
+    documents = Path.home() / "Documents"
+    return documents if documents.is_dir() else Path.home()
+
+
+def make_server(diagram_file: Path | None = None, host: str = "127.0.0.1", port: int = 8000):
+    """With diagram_file, that project is open from the start; without, the page shows its start screen."""
+    # The open project's file (None: no project open), and why it couldn't be read, if it couldn't: then
+    # saving refuses to write, so a file this app can't open is never replaced by an empty diagram.
+    first = Path(diagram_file).resolve() if diagram_file is not None else None
+    state = {"file": first, "load_error": None, "folder": first.parent if first else default_folder()}
+    lock = threading.Lock()  # one read or write of the project file at a time
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, body: bytes, ctype: str) -> None:
@@ -141,6 +150,12 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                 raise HttpError(400, "body is not valid JSON")
 
+        def _object(self) -> dict:
+            body = self._body()
+            if not isinstance(body, dict):
+                raise HttpError(400, "expected an object")
+            return body
+
         def _handle(self, routes: dict) -> None:
             url = urlsplit(self.path)
             try:
@@ -154,43 +169,11 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             except Exception as exc:  # a bug: still answer, so the page shows a reason, not "server unreachable"
                 self._json(500, {"error": f"internal error: {exc!r}"})
 
-        # ---------- GET ----------
-        def do_GET(self):
-            self._handle({
-                "/api/diagram": self._get_diagram, "/api/tables": self._get_tables,
-                "/api/file": lambda url: self._json(200, file_info(state["file"])),
-                "/api/browse": self._get_browse,
-                **{page: self._get_page for page in PAGES},
-            })
-
-        def _load_current(self) -> model.Diagram:
-            with lock:
-                try:
-                    diagram = model.load(state["file"])
-                except (ValueError, OSError) as exc:  # DiagramError is a ValueError
-                    state["load_error"] = str(exc) if isinstance(exc, ValueError) else f"{state['file']}: {exc.strerror or exc}"
-                    raise HttpError(500, state["load_error"])
-                state["load_error"] = None
-                return diagram
-
-        def _get_diagram(self, url):
-            self._json(200, self._load_current().to_dict())
-
-        def _get_tables(self, url):
-            self._json(200, {"tables": model.tables(self._load_current())})
-
-        def _get_browse(self, url):
-            folder = parse_qs(url.query).get("dir", [""])[0] or str(state["file"].parent)
-            self._json(200, browse(folder))
-
-        def _get_page(self, url):
-            name = PAGES[url.path]
-            ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
-            self._send(200, (STATIC / name).read_bytes(), f"{ctype}; charset=utf-8")
-
-        # ---------- PUT: autosave ----------
-        def do_PUT(self):
-            self._handle({"/api/diagram": self._put_diagram})
+        @staticmethod
+        def _project() -> Path:
+            if state["file"] is None:
+                raise HttpError(409, "no project is open")
+            return state["file"]
 
         @staticmethod
         def _valid(raw) -> model.Diagram:
@@ -200,49 +183,93 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             except model.DiagramError as exc:
                 raise HttpError(400, str(exc))
 
+        # ---------- GET ----------
+        def do_GET(self):
+            self._handle({
+                "/api/diagram": self._get_diagram,
+                "/api/file": self._get_file,
+                "/api/browse": self._get_browse,
+                **{page: self._get_page for page in PAGES},
+            })
+
+        def _get_file(self, url):
+            self._json(200, {"open": False} if state["file"] is None else {"open": True, **file_info(state["file"])})
+
+        def _get_diagram(self, url):
+            with lock:
+                path = self._project()
+                try:
+                    diagram = model.load(path)
+                except (ValueError, OSError) as exc:  # DiagramError is a ValueError
+                    state["load_error"] = str(exc) if isinstance(exc, ValueError) else f"{path}: {exc.strerror or exc}"
+                    raise HttpError(500, state["load_error"])
+                state["load_error"] = None
+            self._json(200, diagram.to_dict())
+
+        def _get_browse(self, url):
+            self._json(200, browse(parse_qs(url.query).get("dir", [""])[0] or str(state["folder"])))
+
+        def _get_page(self, url):
+            name = PAGES[url.path]
+            ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            self._send(200, (STATIC / name).read_bytes(), f"{ctype}; charset=utf-8")
+
+        # ---------- PUT: Save ----------
+        def do_PUT(self):
+            self._handle({"/api/diagram": self._put_diagram})
+
         def _put_diagram(self, url):
             diagram = self._valid(self._body())
             claimed = self.headers.get(FILE_HEADER)
             with lock:
-                current = state["file"]
+                current = self._project()
                 if state["load_error"]:
                     raise HttpError(409, f"{current.name} couldn't be opened ({state['load_error']}), so it is not "
-                                         "being overwritten. Use Save as… to keep this drawing in another file.")
+                                         "being overwritten. Use Save copy… to keep this drawing in another file.")
                 if claimed is not None and unquote(claimed) != str(current):
-                    # Sent for a file that has since been switched away from (Open / Save as while it was in flight).
-                    raise HttpError(409, f"not saved: this change was for {unquote(claimed)}, but the file open now is {current}")
+                    # Sent for a project that has since been closed or switched.
+                    raise HttpError(409, f"not saved: this was for {unquote(claimed)}, but the project open now is {current}")
                 try:
                     model.save(diagram, current)
                 except OSError as exc:
                     raise HttpError(500, f"could not save {current.name}: {exc.strerror or exc}")
             self._json(200, {"ok": True})
 
-        # ---------- POST: Save as / Open ----------
+        # ---------- POST: projects ----------
         def do_POST(self):
-            self._handle({"/api/save-as": self._save_as, "/api/open": self._open})
+            self._handle({
+                "/api/new": self._new, "/api/open": self._open, "/api/close": self._close,
+                "/api/save-copy": self._save_copy, "/api/tables": self._tables,
+            })
 
-        def _save_as(self, url):
-            body = self._body()
-            if not isinstance(body, dict):
-                raise HttpError(400, "expected an object")
-            path = target_path(body.get("dir"), body.get("name"))
-            diagram = self._valid(body.get("diagram"))
+        @staticmethod
+        def _free(path: Path, body: dict) -> None:
+            """Refuse to write over a folder, or over a file unless the page says the user agreed."""
             if path.is_dir():
                 raise HttpError(400, f"{path.name} is a folder")
             if (path.exists() or path.is_symlink()) and body.get("overwrite") is not True:
                 raise HttpError(409, f"{path.name} already exists", exists=True, name=path.name)
+
+        @staticmethod
+        def _write(diagram: model.Diagram, path: Path) -> None:
+            try:
+                model.save(diagram, path)
+            except OSError as exc:
+                raise HttpError(400, f"could not save {path.name}: {exc.strerror or exc}")
+
+        def _new(self, url):
+            """Start a new project: an empty diagram, saved straight away under the name given."""
+            body = self._object()
+            path = target_path(body.get("dir"), body.get("name"))
+            self._free(path, body)
+            diagram = model.Diagram()
             with lock:
-                try:
-                    model.save(diagram, path)
-                except OSError as exc:
-                    raise HttpError(400, f"could not save {path.name}: {exc.strerror or exc}")
-                state["file"], state["load_error"] = path, None
-            self._json(200, {"file": file_info(path)})
+                self._write(diagram, path)
+                state.update(file=path, load_error=None, folder=path.parent)
+            self._json(200, {"file": file_info(path), "diagram": diagram.to_dict()})
 
         def _open(self, url):
-            body = self._body()
-            if not isinstance(body, dict):
-                raise HttpError(400, "expected an object")
+            body = self._object()
             path = target_path(body.get("dir"), body.get("name"))
             if not path.is_file():
                 raise HttpError(404, f"there is no file {path.name} in {path.parent}")
@@ -251,8 +278,31 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             except (ValueError, OSError) as exc:  # DiagramError is a ValueError; so is bad UTF-8
                 raise HttpError(400, f"{path.name} can't be opened: {exc}")
             with lock:
-                state["file"], state["load_error"] = path, None
+                state.update(file=path, load_error=None, folder=path.parent)
             self._json(200, {"file": file_info(path), "diagram": diagram.to_dict()})
+
+        def _close(self, url):
+            # The page saves first if the user asked it to; closing itself never writes anything.
+            with lock:
+                state.update(file=None, load_error=None)
+            self._json(200, {"ok": True})
+
+        def _save_copy(self, url):
+            """Write the diagram to another file. The project stays the open one, so later saves don't touch the copy."""
+            body = self._object()
+            path = target_path(body.get("dir"), body.get("name"))
+            diagram = self._valid(body.get("diagram"))
+            if path == state["file"]:
+                raise HttpError(400, f"{path.name} is the project itself; give the copy a different name")
+            self._free(path, body)
+            with lock:
+                self._write(diagram, path)
+                state["folder"] = path.parent
+            self._json(200, {"file": file_info(path)})
+
+        def _tables(self, url):
+            # From the diagram on screen (saved or not), so the tables always match what you see.
+            self._json(200, {"tables": model.tables(self._valid(self._body()))})
 
         def log_message(self, *args):
             pass

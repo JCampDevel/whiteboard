@@ -32,5 +32,10 @@ What the whiteboard must do. This is the current list only; wording from earlier
 
 ## Files
 
-- **R16. Saving and opening.** A diagram is saved in a human-readable format (indented JSON, one field per line, labelled as a whiteboard diagram) and saves automatically to the file being worked on. The user can save it to a file name and folder of their choice (Save as), after which that file is the one being worked on, and can open a diagram file, which then becomes the one being worked on. Before opening, the user is asked to confirm that any unsaved changes will be lost, with Open and Cancel; Cancel cancels the whole operation. Saving over an existing file asks first. Files from earlier versions open and are upgraded; a file that is not a diagram is refused without changing anything. Saving and opening never change the toolbar's layout.
+- **R16. Projects and saving.** A project is one diagram file, saved in a human-readable format (indented JSON, one field per line, labelled as a whiteboard diagram).
+  - When the app opens, a start screen offers **New project** and **Open project**. New project asks for a name, which becomes the file name, and a folder; the user then starts creating the diagram. Open project lets the user pick a diagram file. Creating a project over an existing file asks first.
+  - Changes are saved only when the user presses **Save** (or Ctrl+S). The toolbar shows when there are unsaved changes, and the browser warns before the tab is closed with unsaved changes.
+  - **Close project** asks whether to save if there are unsaved changes (Save / Don't save / Cancel), saves if asked to, and returns to the start screen.
+  - **Save copy** saves the diagram as it is now to another file; the project stays the one open, so later saves don't change the copy. It asks before replacing a file, and can't save over the project itself.
+  - Files from earlier versions open and are upgraded; a file that is not a diagram is refused without changing anything. A file that couldn't be opened is never overwritten. None of this changes the toolbar's layout.
 - **R17. Local only.** The app runs on the user's own machine and is not reachable from other machines.

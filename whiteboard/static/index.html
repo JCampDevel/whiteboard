@@ -42,6 +42,7 @@
     <button id="theme" title="Switch between following your system, light and dark">Theme: Auto</button>
     <button id="home" title="Return the view to your diagram">Home</button>
     <button id="reset-arrow" disabled title="Let the selected arrows choose their own sides and route again">Reset arrow</button>
+    <button id="add-rel" disabled title="Select two or more arrows, then link them with a relationship and describe it">Add relationship</button>
     <button id="hide-arrow" disabled title="Hide the selected arrows from the diagram. They stay in the tables.">Hide arrow</button>
     <button id="unhide" disabled title="Draw every hidden arrow again">Unhide arrows (0)</button>
     <button id="delete" disabled title="Delete the selected item (Delete)">Delete</button>
@@ -74,6 +75,18 @@
     <div class="fd-buttons">
       <button type="button" id="fd-cancel">Cancel</button>
       <button type="submit" id="fd-ok" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="rel-dialog" aria-labelledby="rel-title">
+  <form id="rel-form">
+    <h2 id="rel-title">Add relationship</h2>
+    <p id="rel-arrows"></p>
+    <label class="rel-label" for="rel-text">Describe the relationship</label>
+    <textarea id="rel-text" rows="4" maxlength="1000"></textarea>
+    <div class="fd-buttons">
+      <button type="button" id="rel-cancel">Cancel</button>
+      <button type="submit" class="primary">Add</button>
     </div>
   </form>
 </dialog>

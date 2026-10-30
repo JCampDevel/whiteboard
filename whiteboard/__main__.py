@@ -15,7 +15,11 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     args = parser.parse_args()
 
-    server = make_server(Path(args.file), port=args.port)
+    try:
+        server = make_server(Path(args.file), port=args.port)
+    except OSError as exc:
+        parser.exit(1, f"whiteboard: can't use port {args.port} ({exc.strerror or exc}). "
+                       f"Is the whiteboard already running? Try another port, e.g. --port {args.port + 1}\n")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Whiteboard on {url}  (saving to {Path(args.file).resolve()})  Ctrl+C to stop")
     if not args.no_browser:
@@ -28,4 +32,5 @@ def main() -> None:
         server.server_close()
 
 
-main()
+if __name__ == "__main__":
+    main()

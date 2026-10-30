@@ -26,6 +26,7 @@ ID_PREFIX = {
     "controlled_process": "CP",
     "control_action": "A",
     "feedback": "F",
+    "relationship": "R",
 }
 TYPE_TITLES = {
     "controller": "Controller",
@@ -34,6 +35,7 @@ TYPE_TITLES = {
     "controlled_process": "Controlled Process",
     "control_action": "Control Action",
     "feedback": "Feedback",
+    "relationship": "Relationship",
 }
 NODE_TYPES = ("controller", "control_algorithm", "process_model", "controlled_process")
 CHILD_TYPES = ("control_algorithm", "process_model")  # live inside a controller
@@ -50,7 +52,7 @@ _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _OUT_ACTIONS = ("outgoing", "Outgoing control actions")
 _IN_FEEDBACK = ("incoming", "Incoming feedback")
 _OTHER = ("other", "Other arrows")
-_ARROW_ENDS = (("line", "Line"), ("source", "From"), ("target", "To"))
+_ARROW_ENDS = (("line", "Line"), ("source", "From"), ("target", "To"), ("relationships", "Relationships"))
 # Each entity type's properties, in table-column order. These are the columns of its table and
 # also the properties that can be switched on to show on the diagram.
 FIELDS = {
@@ -67,6 +69,8 @@ FIELDS = {
     # A Control Action says what it asks for; a Feedback says what effect it would have on the entity it points at.
     "control_action": (("id", "ID"), ("name", "Name"), ("description", "Description")) + _ARROW_ENDS,
     "feedback": (("id", "ID"), ("name", "Name"), ("effect", "Effect")) + _ARROW_ENDS,
+    # Not drawn itself, so nothing here is shown on the diagram; these are just its table's columns.
+    "relationship": (("id", "ID"), ("arrows", "Arrows"), ("description", "Description")),
 }
 LONG_TEXT = 1000  # longest description / effect
 DEFAULT_SHOWN = ("id", "name")
@@ -258,9 +262,37 @@ class Edge:
 
 
 @dataclass
+class Relationship:
+    """Two or more arrows the user has said are related (for example a Control Action and the Feedback
+    that reports its result), with the user's description of how."""
+
+    id: str
+    arrows: list[str]
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Relationship":
+        if not isinstance(d, dict):
+            raise DiagramError("a relationship must be an object")
+        arrows = d.get("arrows")
+        if not isinstance(arrows, list) or not all(isinstance(a, str) for a in arrows):
+            raise DiagramError("a relationship's arrows must be a list of arrow ids")
+        if len(set(arrows)) != len(arrows):
+            raise DiagramError("a relationship lists each arrow once")
+        if len(arrows) < 2:
+            raise DiagramError("a relationship needs at least two arrows")
+        return cls(
+            id=_unique_id(d.get("id"), "relationship", "relationship id"),
+            arrows=list(arrows),
+            description=_text(d.get("description", ""), "relationship description", LONG_TEXT),
+        )
+
+
+@dataclass
 class Diagram:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    relationships: list[Relationship] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Diagram":
@@ -274,10 +306,14 @@ class Diagram:
         raw_nodes, raw_edges = d.get("nodes", []), d.get("edges", [])
         if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
             raise DiagramError("nodes and edges must be lists")
+        raw_relationships = d.get("relationships", [])
+        if not isinstance(raw_relationships, list):
+            raise DiagramError("relationships must be a list")
         nodes = [Node.from_dict(n) for n in raw_nodes]
         edges = [Edge.from_dict(e) for e in raw_edges]
+        relationships = [Relationship.from_dict(r) for r in raw_relationships]
 
-        ids = [n.id for n in nodes] + [e.id for e in edges]
+        ids = [n.id for n in nodes] + [e.id for e in edges] + [r.id for r in relationships]
         if len(ids) != len(set(ids)):
             raise DiagramError("ids must be unique")
         by_id = {n.id: n for n in nodes}
@@ -299,7 +335,12 @@ class Diagram:
                 raise DiagramError("an arrow must connect two existing rectangles")
             if e.source == e.target:
                 raise DiagramError("an arrow must connect two different rectangles")
-        return cls(nodes, edges)
+        arrow_ids = {e.id for e in edges}
+        for r in relationships:
+            missing = [a for a in r.arrows if a not in arrow_ids]
+            if missing:
+                raise DiagramError(f"relationship {r.id} refers to {missing[0]}, which is not an arrow in this diagram")
+        return cls(nodes, edges, relationships)
 
     def to_dict(self) -> dict:
         # The first two keys say what the file is, for anyone opening it in a text editor.
@@ -308,6 +349,7 @@ class Diagram:
             "format_version": FILE_FORMAT_VERSION,
             "nodes": [vars(n).copy() for n in self.nodes],
             "edges": [vars(e).copy() for e in self.edges],
+            "relationships": [vars(r).copy() for r in self.relationships],
         }
 
     def bounds(self) -> tuple[float, float, float, float] | None:
@@ -341,8 +383,12 @@ def migrate(raw):
         return raw
     items = [i for i in nodes + edges if isinstance(i, dict)]
 
+    # Values are only used as keys when they are strings: anything else is left for from_dict to reject.
+    def text(value):
+        return value if isinstance(value, str) else None
+
     def conforming(item):
-        prefix = ID_PREFIX.get(item.get("type"))
+        prefix = ID_PREFIX.get(text(item.get("type")))
         return prefix is not None and isinstance(item.get("id"), str) and re.fullmatch(re.escape(prefix) + r"\d+", item["id"])
 
     used = {i["id"] for i in items if conforming(i)}
@@ -356,26 +402,29 @@ def migrate(raw):
                 used.add(f"{prefix}{counters[prefix]}")
                 return f"{prefix}{counters[prefix]}"
 
-    # Only boxes are ever referred to (by arrows and inner boxes), so only their renames are looked up.
-    # Keeping arrows out matters: an old arrow id like "CA1" can equal a new box id.
-    renamed = {}
+    # Boxes are referred to by arrows and inner boxes; arrows by relationships. The two renamings are kept
+    # apart because an old arrow id like "CA1" can equal a new box id.
+    renamed, arrow_renamed = {}, {}
     for item in items:
-        if item.get("type") in ID_PREFIX and not conforming(item) and isinstance(item.get("id"), str):
+        if text(item.get("type")) in ID_PREFIX and not conforming(item) and isinstance(item.get("id"), str):
             new = fresh(item["type"])
-            if item["type"] in NODE_TYPES:
-                renamed[item["id"]] = new
+            (renamed if item["type"] in NODE_TYPES else arrow_renamed)[item["id"]] = new
             item["id"] = new
     for item in items:
         for key in ("source", "target", "parent"):
-            if item.get(key) in renamed:
+            if text(item.get(key)) in renamed:
                 item[key] = renamed[item[key]]
+    relationships = raw.get("relationships")
+    for r in relationships if isinstance(relationships, list) else []:
+        if isinstance(r, dict) and isinstance(r.get("arrows"), list):
+            r["arrows"] = [arrow_renamed.get(a, a) if isinstance(a, str) else a for a in r["arrows"]]
 
     # Arrows used to default to near-black, which vanishes on the dark theme; that default is now "auto".
     for e in edges:
         if isinstance(e, dict) and e.get("colour") == "#111827":
             e["colour"] = AUTO_COLOUR
 
-    have = {(n.get("parent"), n.get("type")) for n in nodes if isinstance(n, dict)}
+    have = {(text(n.get("parent")), text(n.get("type"))) for n in nodes if isinstance(n, dict)}
     for c in [n for n in nodes if isinstance(n, dict) and n.get("type") == "controller" and isinstance(n.get("id"), str)]:
         for child_type in CHILD_TYPES:
             if (c["id"], child_type) not in have:
@@ -465,13 +514,18 @@ def tables(diagram: Diagram) -> list[dict]:
         rows.append({"id": n.id, "name": n.label, "incoming": into, "outgoing": out, "other": other})
     result.append({"key": "controlled_process", "title": "Controlled Process", "columns": columns("controlled_process"), "rows": rows})
 
+    relationships = sorted(diagram.relationships, key=lambda r: _id_order(r.id))
     for type_ in EDGE_TYPES:
         extra = "description" if type_ == "control_action" else "effect"
         rows = [
-            {"id": e.id, "name": e.label, extra: getattr(e, extra), "line": e.style, "source": e.source, "target": e.target}
+            {"id": e.id, "name": e.label, extra: getattr(e, extra), "line": e.style, "source": e.source, "target": e.target,
+             "relationships": [r.id for r in relationships if e.id in r.arrows]}
             for e in edges if e.type == type_
         ]
         result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": columns(type_), "rows": rows})
+
+    result.append({"key": "relationship", "title": "Relationships", "columns": columns("relationship"), "rows": [
+        {"id": r.id, "arrows": list(r.arrows), "description": r.description} for r in relationships]})
     return result
 
 
@@ -484,15 +538,20 @@ def load(path: Path) -> Diagram:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return Diagram()
+    except UnicodeDecodeError:
+        raise DiagramError(f"{path} is not a text file") from None
     try:
         return Diagram.from_dict(migrate(json.loads(text)))
     except json.JSONDecodeError as exc:
         raise DiagramError(f"{path} is not valid JSON: {exc}") from exc
+    except RecursionError:  # absurdly deep nesting
+        raise DiagramError(f"{path} is not a diagram (it is nested too deeply)") from None
 
 
 def save(diagram: Diagram, path: Path) -> None:
-    """Write atomically so a crash never leaves a half-written file."""
-    path = Path(path)
+    """Write atomically so a crash never leaves a half-written file. If path is a symbolic link, the file
+    it points to is written (the link stays a link)."""
+    path = Path(path).resolve()
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(diagram.to_dict(), indent=2), encoding="utf-8")
     tmp.replace(path)

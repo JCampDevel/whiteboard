@@ -129,3 +129,8 @@ dialog h2 { margin: 0 0 12px; font-size: 17px; }
 #fd-error { color: #ef4444; min-height: 1.2em; margin: 8px 0 0; }
 .fd-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+#rel-dialog { width: min(480px, calc(100vw - 32px)); }
+#rel-arrows { margin: 0 0 4px; color: var(--muted); }
+.rel-label { display: block; margin: 8px 0 4px; color: var(--fg); }
+#rel-text { width: 100%; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; resize: vertical; }

@@ -66,7 +66,7 @@ class ServerTests(ServerCase):
 
     def test_new_diagram_is_empty(self):
         status, data = self.call("GET", "/api/diagram")
-        self.assertEqual((status, json.loads(data)), (200, {"format": "whiteboard-diagram", "format_version": 1, "nodes": [], "edges": []}))
+        self.assertEqual((status, json.loads(data)), (200, {"format": "whiteboard-diagram", "format_version": 1, "nodes": [], "edges": [], "relationships": []}))
 
     def test_put_saves_and_get_returns_it(self):
         status, _ = self.call("PUT", "/api/diagram", GOOD)
@@ -99,7 +99,8 @@ class ServerTests(ServerCase):
         self.assertEqual(status, 200)
         tables = json.loads(data)["tables"]
         self.assertEqual([t["key"] for t in tables], [
-            "controller", "control_algorithm", "process_model", "controlled_process", "control_action", "feedback"])
+            "controller", "control_algorithm", "process_model", "controlled_process", "control_action", "feedback",
+            "relationship"])
         controller = tables[0]["rows"][0]
         self.assertEqual((controller["id"], controller["control_algorithm"], controller["outgoing"], controller["incoming"]),
                          ("C1", "CA1", ["A1"], ["F1"]))
@@ -107,7 +108,7 @@ class ServerTests(ServerCase):
     def test_tables_for_an_empty_diagram(self):
         status, data = self.call("GET", "/api/tables")
         self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads(data)["tables"]), 6)
+        self.assertEqual(len(json.loads(data)["tables"]), 7)
 
     def test_an_old_format_file_is_upgraded_when_opened(self):
         self.file.write_text(json.dumps({

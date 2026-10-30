@@ -26,6 +26,7 @@ ID_PREFIX = {
     "controlled_process": "CP",
     "control_action": "A",
     "feedback": "F",
+    "relationship": "R",
 }
 TYPE_TITLES = {
     "controller": "Controller",
@@ -34,6 +35,7 @@ TYPE_TITLES = {
     "controlled_process": "Controlled Process",
     "control_action": "Control Action",
     "feedback": "Feedback",
+    "relationship": "Relationship",
 }
 NODE_TYPES = ("controller", "control_algorithm", "process_model", "controlled_process")
 CHILD_TYPES = ("control_algorithm", "process_model")  # live inside a controller
@@ -50,7 +52,7 @@ _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _OUT_ACTIONS = ("outgoing", "Outgoing control actions")
 _IN_FEEDBACK = ("incoming", "Incoming feedback")
 _OTHER = ("other", "Other arrows")
-_ARROW_ENDS = (("line", "Line"), ("source", "From"), ("target", "To"))
+_ARROW_ENDS = (("line", "Line"), ("source", "From"), ("target", "To"), ("relationships", "Relationships"))
 # Each entity type's properties, in table-column order. These are the columns of its table and
 # also the properties that can be switched on to show on the diagram.
 FIELDS = {
@@ -67,6 +69,8 @@ FIELDS = {
     # A Control Action says what it asks for; a Feedback says what effect it would have on the entity it points at.
     "control_action": (("id", "ID"), ("name", "Name"), ("description", "Description")) + _ARROW_ENDS,
     "feedback": (("id", "ID"), ("name", "Name"), ("effect", "Effect")) + _ARROW_ENDS,
+    # Not drawn itself, so nothing here is shown on the diagram; these are just its table's columns.
+    "relationship": (("id", "ID"), ("arrows", "Arrows"), ("description", "Description")),
 }
 LONG_TEXT = 1000  # longest description / effect
 DEFAULT_SHOWN = ("id", "name")
@@ -258,9 +262,37 @@ class Edge:
 
 
 @dataclass
+class Relationship:
+    """Two or more arrows the user has said are related (for example a Control Action and the Feedback
+    that reports its result), with the user's description of how."""
+
+    id: str
+    arrows: list[str]
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Relationship":
+        if not isinstance(d, dict):
+            raise DiagramError("a relationship must be an object")
+        arrows = d.get("arrows")
+        if not isinstance(arrows, list) or not all(isinstance(a, str) for a in arrows):
+            raise DiagramError("a relationship's arrows must be a list of arrow ids")
+        if len(set(arrows)) != len(arrows):
+            raise DiagramError("a relationship lists each arrow once")
+        if len(arrows) < 2:
+            raise DiagramError("a relationship needs at least two arrows")
+        return cls(
+            id=_unique_id(d.get("id"), "relationship", "relationship id"),
+            arrows=list(arrows),
+            description=_text(d.get("description", ""), "relationship description", LONG_TEXT),
+        )
+
+
+@dataclass
 class Diagram:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    relationships: list[Relationship] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Diagram":
@@ -274,10 +306,14 @@ class Diagram:
         raw_nodes, raw_edges = d.get("nodes", []), d.get("edges", [])
         if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
             raise DiagramError("nodes and edges must be lists")
+        raw_relationships = d.get("relationships", [])
+        if not isinstance(raw_relationships, list):
+            raise DiagramError("relationships must be a list")
         nodes = [Node.from_dict(n) for n in raw_nodes]
         edges = [Edge.from_dict(e) for e in raw_edges]
+        relationships = [Relationship.from_dict(r) for r in raw_relationships]
 
-        ids = [n.id for n in nodes] + [e.id for e in edges]
+        ids = [n.id for n in nodes] + [e.id for e in edges] + [r.id for r in relationships]
         if len(ids) != len(set(ids)):
             raise DiagramError("ids must be unique")
         by_id = {n.id: n for n in nodes}
@@ -299,7 +335,12 @@ class Diagram:
                 raise DiagramError("an arrow must connect two existing rectangles")
             if e.source == e.target:
                 raise DiagramError("an arrow must connect two different rectangles")
-        return cls(nodes, edges)
+        arrow_ids = {e.id for e in edges}
+        for r in relationships:
+            missing = [a for a in r.arrows if a not in arrow_ids]
+            if missing:
+                raise DiagramError(f"relationship {r.id} refers to {missing[0]}, which is not an arrow in this diagram")
+        return cls(nodes, edges, relationships)
 
     def to_dict(self) -> dict:
         # The first two keys say what the file is, for anyone opening it in a text editor.
@@ -308,6 +349,7 @@ class Diagram:
             "format_version": FILE_FORMAT_VERSION,
             "nodes": [vars(n).copy() for n in self.nodes],
             "edges": [vars(e).copy() for e in self.edges],
+            "relationships": [vars(r).copy() for r in self.relationships],
         }
 
     def bounds(self) -> tuple[float, float, float, float] | None:
@@ -465,13 +507,18 @@ def tables(diagram: Diagram) -> list[dict]:
         rows.append({"id": n.id, "name": n.label, "incoming": into, "outgoing": out, "other": other})
     result.append({"key": "controlled_process", "title": "Controlled Process", "columns": columns("controlled_process"), "rows": rows})
 
+    relationships = sorted(diagram.relationships, key=lambda r: _id_order(r.id))
     for type_ in EDGE_TYPES:
         extra = "description" if type_ == "control_action" else "effect"
         rows = [
-            {"id": e.id, "name": e.label, extra: getattr(e, extra), "line": e.style, "source": e.source, "target": e.target}
+            {"id": e.id, "name": e.label, extra: getattr(e, extra), "line": e.style, "source": e.source, "target": e.target,
+             "relationships": [r.id for r in relationships if e.id in r.arrows]}
             for e in edges if e.type == type_
         ]
         result.append({"key": type_, "title": TYPE_TITLES[type_], "columns": columns(type_), "rows": rows})
+
+    result.append({"key": "relationship", "title": "Relationships", "columns": columns("relationship"), "rows": [
+        {"id": r.id, "arrows": list(r.arrows), "description": r.description} for r in relationships]})
     return result
 
 

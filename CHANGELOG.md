@@ -4,6 +4,29 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.13.0, 2026-10-30: Relationships between arrows
+
+On branch `FeddbackControlActionRelation`.
+
+**Added**
+- **Add relationship** (toolbar): with two or more arrows selected, opens a box listing them, to describe how they are related. Creates a relationship R1, R2, ...
+- **Relationships table** (a new tab): ID, Arrows, Description, Remove. Double-click a description to edit it; click an ID to select that relationship's arrows on the diagram; Remove deletes the relationship, not the arrows.
+- A **Relationships** column in the Control Action and Feedback tables, listing the relationships each arrow is in. Tick it to show them on the arrow.
+- Saved as `relationships` in the diagram file. Older files open with none.
+- Requirement R21.
+
+**Changed**
+- Deleting arrows removes them from their relationships; a relationship left with fewer than two arrows is deleted with them.
+- There are now seven tables.
+
+**Docs**: REQUIREMENTS.md (R21), DESIGN.md (relationships, file format), README.
+
+**Tests**: 91 (was 85): no relationships by default; round trip; refused when fewer than two arrows, the same arrow twice, an unknown arrow, a box instead of an arrow, a wrong or duplicate id, or bad types; long descriptions cut; the Relationships table and each arrow's Relationships column; showing them on an arrow. Table-count tests updated for seven tables.
+
+**Not verified**: the button, dialog and table are browser code and have not been run. Check: select two arrows and Add relationship; Cancel; edit a description in the table; click an R id; Remove; delete one of two related arrows (the relationship should go).
+
+---
+
 ## 0.12.0, 2026-10-30: Real Save as / Open, a proper Open prompt, steady toolbar
 
 Asked: when saving, choose the file name and folder; when opening, a prompt saying unsaved changes will be lost, with Open (opens it) and Cancel (cancels); and the toolbar shouldn't jump to two lines and back when saving.

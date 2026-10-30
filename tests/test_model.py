@@ -278,8 +278,8 @@ class DescriptionAndEffect(unittest.TestCase):
 
     def test_each_has_its_own_column_and_can_be_shown_on_the_diagram(self):
         t = {x["key"]: x for x in model.tables(Diagram())}
-        self.assertEqual([c["key"] for c in t["control_action"]["columns"]], ["id", "name", "description", "line", "source", "target"])
-        self.assertEqual([c["key"] for c in t["feedback"]["columns"]], ["id", "name", "effect", "line", "source", "target"])
+        self.assertEqual([c["key"] for c in t["control_action"]["columns"]], ["id", "name", "description", "line", "source", "target", "relationships"])
+        self.assertEqual([c["key"] for c in t["feedback"]["columns"]], ["id", "name", "effect", "line", "source", "target", "relationships"])
         d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", shown=["description", "id"])]})
         self.assertEqual(d.edges[0].shown, ["id", "description"])
         with self.assertRaises(DiagramError):  # a Feedback has no description to show
@@ -314,6 +314,67 @@ class FileFormat(unittest.TestCase):
         for v in (2, "1", True, None):
             with self.subTest(v=v), self.assertRaises(DiagramError):
                 Diagram.from_dict({"format": "whiteboard-diagram", "format_version": v, "nodes": []})
+
+
+class Relationships(unittest.TestCase):
+    NODES = [node("C1"), node("CP1", "controlled_process")]
+    EDGES = [edge("A1", "C1", "CP1"), edge("F1", "CP1", "C1", "feedback"), edge("A2", "C1", "CP1")]
+
+    def diagram(self, *relationships):
+        return {"nodes": self.NODES, "edges": self.EDGES, "relationships": list(relationships)}
+
+    def test_none_by_default_and_old_files_still_open(self):
+        self.assertEqual(Diagram.from_dict({"nodes": self.NODES, "edges": self.EDGES}).relationships, [])
+
+    def test_round_trip(self):
+        d = Diagram.from_dict(self.diagram(
+            {"id": "R1", "arrows": ["A1", "F1"], "description": "F1 reports whether A1 worked"},
+            {"id": "R2", "arrows": ["A1", "A2", "F1"]}))
+        self.assertEqual([(r.id, r.arrows, r.description) for r in d.relationships],
+                         [("R1", ["A1", "F1"], "F1 reports whether A1 worked"), ("R2", ["A1", "A2", "F1"], "")])
+        self.assertEqual(Diagram.from_dict(d.to_dict()), d)
+
+    def test_invalid_relationships_are_refused(self):
+        bad = [
+            {"id": "R1", "arrows": ["A1"]},                       # only one arrow
+            {"id": "R1", "arrows": []},
+            {"id": "R1", "arrows": ["A1", "A1"]},                 # the same arrow twice
+            {"id": "R1", "arrows": ["A1", "A9"]},                 # no such arrow
+            {"id": "R1", "arrows": ["A1", "C1"]},                 # a box, not an arrow
+            {"id": "R1", "arrows": "A1,F1"},
+            {"id": "R1", "arrows": ["A1", 5]},
+            {"id": "X1", "arrows": ["A1", "F1"]},                 # wrong id prefix
+            {"id": "A3", "arrows": ["A1", "F1"]},
+            {"id": "R1", "arrows": ["A1", "F1"], "description": 5},
+            "R1",
+        ]
+        for r in bad:
+            with self.subTest(r=r), self.assertRaises(DiagramError):
+                Diagram.from_dict(self.diagram(r))
+        with self.assertRaises(DiagramError):  # ids are unique across everything
+            Diagram.from_dict(self.diagram({"id": "R1", "arrows": ["A1", "F1"]}, {"id": "R1", "arrows": ["A2", "F1"]}))
+        with self.assertRaises(DiagramError):
+            Diagram.from_dict(dict(self.diagram(), relationships="R1"))
+
+    def test_long_descriptions_are_cut_at_the_limit(self):
+        d = Diagram.from_dict(self.diagram({"id": "R1", "arrows": ["A1", "F1"], "description": "x" * 5000}))
+        self.assertEqual(len(d.relationships[0].description), model.LONG_TEXT)
+
+    def test_tables(self):
+        d = Diagram.from_dict(self.diagram(
+            {"id": "R2", "arrows": ["A2", "F1"]}, {"id": "R1", "arrows": ["A1", "F1"], "description": "result"}))
+        t = {x["key"]: x for x in model.tables(d)}
+        self.assertEqual(t["relationship"]["title"], "Relationships")
+        self.assertEqual([c["key"] for c in t["relationship"]["columns"]], ["id", "arrows", "description"])
+        self.assertEqual(t["relationship"]["rows"], [
+            {"id": "R1", "arrows": ["A1", "F1"], "description": "result"},
+            {"id": "R2", "arrows": ["A2", "F1"], "description": ""}])
+        rels = {r["id"]: r["relationships"] for x in ("control_action", "feedback") for r in t[x]["rows"]}
+        self.assertEqual(rels, {"A1": ["R1"], "A2": ["R2"], "F1": ["R1", "R2"]})
+
+    def test_an_arrow_can_show_its_relationships_on_the_diagram(self):
+        d = Diagram.from_dict({"nodes": self.NODES, "edges": [edge("A1", "C1", "CP1", shown=["id", "relationships"])]})
+        self.assertEqual(d.edges[0].shown, ["id", "relationships"])
 
 
 class Migration(unittest.TestCase):
@@ -411,7 +472,8 @@ class Tables(unittest.TestCase):
 
     def test_there_is_one_table_per_entity_type_in_order(self):
         self.assertEqual([t["key"] for t in self.t], [
-            "controller", "control_algorithm", "process_model", "controlled_process", "control_action", "feedback"])
+            "controller", "control_algorithm", "process_model", "controlled_process", "control_action", "feedback",
+            "relationship"])
         self.assertEqual([t["title"] for t in self.t][:4],
                          ["Controller", "Control Algorithm", "Process Model", "Controlled Process"])
 
@@ -450,9 +512,9 @@ class Tables(unittest.TestCase):
         d = Diagram.from_dict({"nodes": [node("CP10", "controlled_process"), node("CP2", "controlled_process")]})
         self.assertEqual([r["id"] for r in table(model.tables(d), "controlled_process")["rows"]], ["CP2", "CP10"])
 
-    def test_empty_diagram_gives_six_empty_tables(self):
+    def test_empty_diagram_gives_seven_empty_tables(self):
         t = model.tables(Diagram())
-        self.assertEqual(len(t), 6)
+        self.assertEqual(len(t), 7)
         self.assertTrue(all(x["rows"] == [] for x in t))
 
     def test_controller_without_inner_boxes_has_blank_links(self):

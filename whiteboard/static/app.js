@@ -8,11 +8,12 @@ const EDGE_TOOLS = ["control_action", "feedback"];
 const TYPE_NAMES = {
   controller: "Controller", control_algorithm: "Control Algorithm", process_model: "Process Model",
   controlled_process: "Controlled Process", control_action: "Control Action", feedback: "Feedback",
+  relationship: "Relationship",
 };
 // Every item's unique id is its type's prefix and a number: C1, CA1, PM1, CP1, A1, F1.
 const ID_PREFIX = {
   controller: "C", control_algorithm: "CA", process_model: "PM",
-  controlled_process: "CP", control_action: "A", feedback: "F",
+  controlled_process: "CP", control_action: "A", feedback: "F", relationship: "R",
 };
 const CHILD_TYPES = ["control_algorithm", "process_model"];   // drawn inside a Controller, right half
 const CTRL_MIN = { w: 360, h: 140 };                          // a Controller never gets smaller than this
@@ -38,6 +39,7 @@ const api = (path, options = {}) => fetch(path, {
   headers: { "X-Whiteboard": "1", ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) },
 });
 const board = $("board"), scroller = $("scroller"), statusEl = $("status");
+const addRelBtn = $("add-rel");
 const styleEl = $("style"), deleteBtn = $("delete"), hideBtn = $("hide-arrow"), unhideBtn = $("unhide"), resetBtn = $("reset-arrow");
 const colourBtn = $("colour-btn"), swatchEl = $("colour-swatch"), paletteEl = $("palette"), themeBtn = $("theme");
 
@@ -69,7 +71,7 @@ const el = (name, attrs = {}, parent) => {
 function newId(type) {
   const prefix = ID_PREFIX[type], re = new RegExp("^" + prefix + "(\\d+)$");
   let max = 0;
-  for (const i of diagram.nodes.concat(diagram.edges)) {
+  for (const i of diagram.nodes.concat(diagram.edges, diagram.relationships || [])) {
     const m = re.exec(i.id);
     if (m) max = Math.max(max, Number(m[1]));
   }
@@ -390,6 +392,7 @@ function render() {
   hideBtn.disabled = ![...selection].some(id => edgeById(id) && !edgeById(id).hidden);
   unhideBtn.disabled = !hiddenCount; // always there, so the toolbar doesn't change length
   unhideBtn.textContent = `Unhide arrows (${hiddenCount})`;
+  addRelBtn.disabled = selectedArrows().length < 2;
   resetBtn.disabled = ![...selection].map(edgeById).some(e => e && (e.source_anchor || e.target_anchor || (e.via && e.via.length)));
 }
 
@@ -431,6 +434,7 @@ async function load() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
     diagram = data;
+    diagram.relationships = diagram.relationships || []; // files from before 0.13 have none
     layoutChildren();
     setStatus(diagram.nodes.length ? "Loaded" : "New diagram");
   } catch (err) { setStatus("Could not load: " + err.message); }
@@ -538,6 +542,11 @@ function deleteSelected() {
   diagram.nodes = diagram.nodes.filter(n => !doomed.has(n.id));
   // An arrow can't exist without both ends, so arrows on a deleted rectangle go too.
   diagram.edges = diagram.edges.filter(e => !doomed.has(e.id) && nodeById(e.source) && nodeById(e.target));
+  // A relationship needs at least two arrows: forget deleted ones, and drop any left with fewer than two.
+  const left = new Set(diagram.edges.map(e => e.id));
+  diagram.relationships = (diagram.relationships || [])
+    .map(r => ({ ...r, arrows: r.arrows.filter(a => left.has(a)) }))
+    .filter(r => r.arrows.length >= 2);
   setSelection([]);
   changed();
 }
@@ -946,6 +955,64 @@ function ask(message, okLabel) {
   });
 }
 
+// ---------- relationships ----------
+// Two or more arrows the user says are related (say a Control Action and the Feedback that reports its result),
+// with a description. Made from the selected arrows; listed, edited and removed in the Relationships table.
+const relDialog = $("rel-dialog"), relText = $("rel-text");
+let relArrows = [];
+const relById = (id) => (diagram.relationships || []).find(r => r.id === id);
+function selectedArrows() { return [...selection].map(edgeById).filter(e => e && !e.hidden); }
+
+addRelBtn.addEventListener("click", () => {
+  relArrows = selectedArrows().map(e => e.id);
+  if (relArrows.length < 2) return;
+  $("rel-arrows").textContent = "Between " + relArrows.map(id => {
+    const e = edgeById(id);
+    return e.label ? `${id} (${e.label})` : id;
+  }).join(", ");
+  relText.value = "";
+  relDialog.showModal();
+  relText.focus();
+});
+$("rel-cancel").addEventListener("click", () => relDialog.close());
+$("rel-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const r = { id: newId("relationship"), arrows: relArrows, description: relText.value.slice(0, 1000) };
+  diagram.relationships.push(r);
+  relDialog.close();
+  changed();
+  setStatus(`Added relationship ${r.id}`);
+  // Show it in its table.
+  setSelection([]);
+  activeTab = "relationship";
+  if (!dockOpen) await openDock();
+});
+
+function removeRelationship(rel) {
+  diagram.relationships = diagram.relationships.filter(r => r !== rel);
+  const t = tableData.find(x => x.key === "relationship");
+  if (t) t.rows = t.rows.filter(row => row.id !== rel.id); // gone at once, before the save comes back
+  changed();
+  renderDock();
+  setStatus(`Removed relationship ${rel.id}`);
+}
+
+// Select a relationship's arrows on the diagram and centre on them, staying on the Relationships table.
+function selectRelationship(rel) {
+  const tab = activeTab;
+  const shown = rel.arrows.map(edgeById).filter(e => e && !e.hidden);
+  const ends = shown.map(edgeEnds).filter(Boolean);
+  if (ends.length) {
+    const xs = ends.flatMap(e => [e.x1, e.x2]), ys = ends.flatMap(e => [e.y1, e.y2]);
+    const c = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+    view = { x: scroller.clientWidth / 2 - c.x, y: scroller.clientHeight / 2 - c.y };
+    applyView();
+  }
+  if (shown.length < rel.arrows.length) setStatus(`Some of ${rel.id}'s arrows are hidden`);
+  setSelection(shown.map(e => e.id));
+  if (activeTab !== tab) { activeTab = tab; renderDock(); }
+}
+
 // ---------- tables ----------
 // A panel under the diagram, one tab per entity type. Selecting something on the diagram
 // switches to its table and highlights its row; clicking an ID in a table selects it on the diagram.
@@ -1014,6 +1081,8 @@ function highlightRows() {
 
 // Jump from a table to the item on the diagram.
 function goTo(id) {
+  const rel = relById(id);
+  if (rel) { selectRelationship(rel); return; }
   const item = itemById(id);
   if (!item) return;
   if (item.hidden) setStatus(`${id} is hidden: tick "On diagram" in its table to draw it`);
@@ -1089,15 +1158,23 @@ function renderDock() {
   tablesEl.replaceChildren(html("h2", t.title));
   rebuilding = false;
   if (!t.rows.length) {
-    tablesEl.append(html("p", `No ${t.title} drawn yet.`, "hint"));
+    tablesEl.append(html("p", t.key === "relationship"
+      ? "No relationships yet. Select two or more arrows on the diagram (Shift+click), then click Add relationship."
+      : `No ${t.title} drawn yet.`, "hint"));
     return;
   }
-  tablesEl.append(html("p", "Double-click a name, description or effect to edit it. Tick a box to show that property of that item on the diagram. Drag the right edge of a heading to resize the column.", "hint"));
+  const isRel = t.key === "relationship";
+  tablesEl.append(html("p", isRel
+    ? "Click a relationship's ID to select its arrows on the diagram. Double-click a description to edit it."
+    : "Double-click a name, description or effect to edit it. Tick a box to show that property of that item on the diagram. Drag the right edge of a heading to resize the column.", "hint"));
 
   const items = t.rows.map(r => itemById(r.id)).filter(Boolean);
   // Arrows get one more column: whether the arrow is drawn on the diagram at all.
   const arrows = t.key === "control_action" || t.key === "feedback";
-  const specs = t.columns.map(c => ({ ...c, kind: "property" })).concat(arrows ? [{ key: "drawn", title: "On diagram", kind: "drawn" }] : []);
+  // Relationships aren't drawn, so their table has no tick boxes; it has a Remove button instead.
+  const specs = t.columns.map(c => ({ ...c, kind: "property" }))
+    .concat(arrows ? [{ key: "drawn", title: "On diagram", kind: "drawn" }] : [])
+    .concat(isRel ? [{ key: "remove", title: "", kind: "remove" }] : []);
 
   const headerTicks = [];
   const syncHeaderTicks = () => headerTicks.forEach(({ cb, spec }) => {
@@ -1125,8 +1202,8 @@ function renderDock() {
       else setShown(items, spec.key, cb.checked);
       renderDock();
     });
-    headerTicks.push({ cb, spec });
-    label.append(cb, html("span", spec.title));
+    if (isRel) label.append(html("span", spec.title));
+    else { headerTicks.push({ cb, spec }); label.append(cb, html("span", spec.title)); }
     const grip = html("div", undefined, "col-grip");
     grip.title = "Drag to resize";
     grip.addEventListener("mousedown", (ev) => {
@@ -1154,12 +1231,19 @@ function renderDock() {
 
   const body = html("tbody");
   for (const row of t.rows) {
-    const tr = html("tr"), item = itemById(row.id);
+    const tr = html("tr"), item = isRel ? relById(row.id) : itemById(row.id);
     tr.dataset.id = row.id;
     specs.forEach(spec => {
       const td = html("td"), cell = html("div", undefined, "cell"); // tick box on the left, value after it
       td.append(cell);
-      if (item && spec.kind === "drawn") {
+      if (isRel && item && spec.kind === "remove") {
+        const b = html("button", "Remove");
+        b.title = `Remove relationship ${row.id} (the arrows stay)`;
+        b.addEventListener("click", () => removeRelationship(item));
+        cell.append(b);
+      } else if (isRel) {
+        // no tick boxes: a relationship isn't drawn
+      } else if (item && spec.kind === "drawn") {
         const cb = tickBox(`Draw ${row.id} on the diagram`);
         cb.checked = !item.hidden;
         cb.addEventListener("change", () => { setHidden([item], !cb.checked); syncHeaderTicks(); });

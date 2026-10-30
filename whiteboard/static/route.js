@@ -44,14 +44,20 @@ function routeOrthogonal(S, sd, T, td, obstacles, via = []) {
     let leg = null;
     const accept = final ? (d) => d !== td // don't arrive heading back out along the end's own stub
       : B.axis === 0 || B.axis === 1 ? (d) => d % 2 === B.axis : () => true;
-    if (stubsClear && !blocked(A) && !blocked(B)) leg = searchGrid(A, heading, B, accept, rects);
+    if (stubsClear && !blocked(A) && !blocked(B)) {
+      // The last leg must arrive heading straight into the box (the turn onto the stub is a bend too, and
+      // would otherwise be free, pushing the bend of a simple Z right up to the box). Fall back if impossible.
+      leg = final
+        ? searchGrid(A, heading, B, (d) => d === (td + 2) % 4, rects) || searchGrid(A, heading, B, accept, rects)
+        : searchGrid(A, heading, B, accept, rects);
+    }
     if (!leg) { // boxes too close together, or boxed in: a plain right-angled link
       leg = heading % 2 === 0 ? [A, { x: B.x, y: A.y }, B] : [A, { x: A.x, y: B.y }, B];
     }
     const rest = leg.slice(1).map(p => ({ x: p.x, y: p.y }));
     if (!rest.length) rest.push({ x: B.x, y: B.y });
     if (final) rest[rest.length - 1].stub = true;
-    else rest[rest.length - 1].via = k;
+    else Object.assign(rest[rest.length - 1], { via: k, axis: B.axis }); // axis: which run a corner pin belongs to
     points.push(...rest);
     heading = headingOf(leg, heading);
   }
@@ -95,6 +101,18 @@ function searchGrid(A, hd, B, accept, rects) {
   const nx = X.length, ny = Y.length;
   const xi = new Map(X.map((v, i) => [v, i])), yi = new Map(Y.map((v, i) => [v, i]));
   const isBlocked = (p) => considered.some(r => p.x > r.x1 && p.x < r.x2 && p.y > r.y1 && p.y < r.y2);
+  // Whether each grid point, and each step from a point in each direction, is blocked: worked out once each.
+  const pointBlocked = new Int8Array(nx * ny).fill(-1), stepBlocked = new Int8Array(nx * ny * 4).fill(-1);
+  const pointFree = (i, j) => {
+    const k = i * ny + j;
+    if (pointBlocked[k] < 0) pointBlocked[k] = isBlocked({ x: X[i], y: Y[j] }) ? 1 : 0;
+    return pointBlocked[k] === 0;
+  };
+  const stepFree = (i, j, nd, ni, nj) => {
+    const k = (i * ny + j) * 4 + nd;
+    if (stepBlocked[k] < 0) stepBlocked[k] = isBlocked({ x: (X[i] + X[ni]) / 2, y: (Y[j] + Y[nj]) / 2 }) ? 1 : 0;
+    return stepBlocked[k] === 0;
+  };
 
   const id = (i, j, d) => (i * ny + j) * 4 + d;
   const dist = new Float64Array(nx * ny * 4).fill(Infinity);
@@ -134,8 +152,9 @@ function searchGrid(A, hd, B, accept, rects) {
   push([h(xi.get(A.x), yi.get(A.y)), start]);
 
   while (heap.length) {
-    const [, s] = pop();
+    const [f, s] = pop();
     const d = s % 4, cell = (s - d) / 4, j = cell % ny, i = (cell - j) / ny;
+    if (f > dist[s] + h(i, j) + 1e-9) continue; // a stale entry: this state was reached more cheaply since
     if (i === goalI && j === goalJ && accept(d)) { // arrived, heading a permitted way
       const pts = [];
       for (let k = s; k !== -1; k = prev[k]) {
@@ -148,8 +167,8 @@ function searchGrid(A, hd, B, accept, rects) {
       if (nd === (d + 2) % 4) continue; // no U-turns
       const ni = i + DIRS[nd].x, nj = j + DIRS[nd].y;
       if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) continue;
+      if (!pointFree(ni, nj) || !stepFree(i, j, nd, ni, nj)) continue;
       const to = { x: X[ni], y: Y[nj] };
-      if (isBlocked(to) || isBlocked({ x: (X[i] + to.x) / 2, y: (Y[j] + to.y) / 2 })) continue;
       const cost = dist[s] + Math.abs(to.x - X[i]) + Math.abs(to.y - Y[j]) + (nd !== d ? ROUTE.BEND : 0);
       const t = id(ni, nj, nd);
       if (cost < dist[t]) {
@@ -167,8 +186,10 @@ function tidy(points) {
   const out = [];
   for (const p of points) {
     const last = out[out.length - 1];
-    if (last && last.x === p.x && last.y === p.y) { // same place: keep one point with both tags
-      if (p.via !== undefined) last.via = p.via;
+    if (last && last.x === p.x && last.y === p.y && !(last.via !== undefined && p.via !== undefined)) {
+      // Same place: keep one point with both tags. (Two pins in one place are both kept, so each still
+      // has a handle and can be moved or released.)
+      if (p.via !== undefined) Object.assign(last, { via: p.via, axis: p.axis });
       if (p.stub) last.stub = true;
       continue;
     }

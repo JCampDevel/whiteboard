@@ -264,3 +264,92 @@ class FileTests(ServerCase):
                 self.assertIn(name, data["error"])
         self.assertEqual(json.loads(self.call("GET", "/api/file")[1])["name"], "d.json")
         self.assertEqual(len(json.loads(self.file.read_text())["nodes"]), 4)
+
+
+class RobustnessTests(ServerCase):
+    """Problems found in review: each of these used to lose data or drop the connection."""
+
+    def test_a_file_that_cannot_be_read_is_never_overwritten_by_autosave(self):
+        original = json.dumps({"format": "whiteboard-diagram", "format_version": 99, "nodes": [], "edges": []})
+        self.file.write_text(original)
+        self.assertEqual(self.call("GET", "/api/diagram")[0], 500)  # the page shows "Could not load"
+        status, data = self.call("PUT", "/api/diagram", GOOD)       # ...and the user draws something
+        self.assertEqual(status, 409)
+        self.assertIn("Save as", json.loads(data)["error"])
+        self.assertEqual(self.file.read_text(), original)
+        # Save as elsewhere still works, and from then on autosave goes there.
+        status, _ = self.call("POST", "/api/save-as", {"dir": self.tmp.name, "name": "rescued", "diagram": GOOD})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call("PUT", "/api/diagram", GOOD)[0], 200)
+        self.assertEqual(self.file.read_text(), original)
+
+    def test_unreadable_working_files_give_a_reason_not_a_dropped_connection(self):
+        self.file.write_bytes(b"\xff\xfe not text")
+        status, data = self.call("GET", "/api/diagram")
+        self.assertEqual(status, 500)
+        self.assertIn("not a text file", json.loads(data)["error"])
+        self.file.unlink()
+        self.file.mkdir()  # a folder where the file should be
+        self.assertEqual(self.call("GET", "/api/tables")[0], 500)
+
+    def test_odd_bodies_and_paths_get_an_answer(self):
+        odd = [
+            ("PUT", "/api/diagram", {"nodes": [{"id": "C1", "type": [], "x": 0, "y": 0, "w": 50, "h": 50}], "edges": []}),
+            ("PUT", "/api/diagram", {"nodes": [], "edges": [{"id": "A1", "type": "control_action", "source": [1], "target": "x"}]}),
+            ("PUT", "/api/diagram", {"nodes": [{"id": "CA1", "type": "control_algorithm", "parent": {}, "x": 0, "y": 0, "w": 50, "h": 50}], "edges": []}),
+            ("PUT", "/api/diagram", "[" * 100000),
+            ("GET", "/api/browse?dir=~nosuchuser_xyz/x", None),
+            ("GET", "/api/browse?dir=/tmp%00x", None),
+            ("POST", "/api/save-as", {"dir": "~nosuchuser_xyz", "name": "x", "diagram": GOOD}),
+        ]
+        for method, path, body in odd:
+            with self.subTest(path=path, body=str(body)[:60]):
+                status, data = self.call(method, path, body)  # would raise RemoteDisconnected before
+                self.assertEqual(status, 400)
+                self.assertIn("error", json.loads(data))
+
+    def test_a_save_that_cannot_be_written_says_why(self):
+        if hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0:
+            self.skipTest("root can write anywhere")
+        locked = Path(self.tmp.name) / "locked"
+        locked.mkdir()
+        (locked / "d.json").write_text(json.dumps(GOOD))
+        self.assertEqual(self.call("POST", "/api/open", {"dir": str(locked), "name": "d.json"})[0], 200)
+        locked.chmod(0o500)
+        try:
+            status, data = self.call("PUT", "/api/diagram", GOOD)
+            self.assertEqual(status, 500)
+            self.assertIn("could not save", json.loads(data)["error"])
+        finally:
+            locked.chmod(0o700)
+
+    def test_a_save_meant_for_another_file_is_refused(self):
+        # An autosave sent just before Open switched files must not land in the newly opened file.
+        other = Path(self.tmp.name) / "other.json"
+        other.write_text(json.dumps(GOOD))
+        self.call("POST", "/api/open", {"dir": self.tmp.name, "name": "other.json"})
+        from urllib.parse import quote
+        status, _ = self.call("PUT", "/api/diagram", {"nodes": [], "edges": []},
+                              headers={"X-Whiteboard-File": quote(str(self.file.resolve()))})
+        self.assertEqual(status, 409)
+        self.assertEqual(len(json.loads(other.read_text())["nodes"]), 4)
+        status, _ = self.call("PUT", "/api/diagram", {"nodes": [], "edges": []},
+                              headers={"X-Whiteboard-File": quote(str(other.resolve()))})
+        self.assertEqual(status, 200)
+
+    def test_saving_through_a_symbolic_link_keeps_the_link(self):
+        real = Path(self.tmp.name) / "real.json"
+        real.write_text(json.dumps(GOOD))
+        link = Path(self.tmp.name) / "link.json"
+        link.symlink_to(real)
+        self.call("POST", "/api/open", {"dir": self.tmp.name, "name": "link.json"})
+        self.assertEqual(self.call("PUT", "/api/diagram", {"nodes": [], "edges": []})[0], 200)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(json.loads(real.read_text())["nodes"], [])
+        # Save as onto a link that points at a missing file writes that file and keeps the link.
+        dangling = Path(self.tmp.name) / "dangling.json"
+        dangling.symlink_to(Path(self.tmp.name) / "nowhere.json")
+        status, _ = self.call("POST", "/api/save-as", {"dir": self.tmp.name, "name": "dangling.json", "diagram": GOOD})
+        self.assertEqual(status, 200)
+        self.assertTrue(dangling.is_symlink())
+        self.assertEqual(len(json.loads((Path(self.tmp.name) / "nowhere.json").read_text())["nodes"]), 4)

@@ -4,6 +4,38 @@ Every change to the code, tests or docs gets an entry here, newest first.
 
 ---
 
+## 0.13.1, 2026-10-30: Fixes from a full code review
+
+Three reviewers (one each for the arrows, the rest of the page, and the Python server and model) read the whole codebase; every finding was checked against the code before fixing. The Python ones were reproduced by running them; the JavaScript ones by reasoning (still no way to run it here).
+
+**Fixed: data loss**
+- A diagram file that failed to load (damaged, or from a newer version) was **overwritten with an empty diagram** as soon as you drew anything. The server now refuses to autosave over a file it couldn't read, and says to use Save as.
+- An autosave still in flight when Open or Save as switched files could be written into the **newly opened file**. Autosaves now say which file they are for, and the server refuses one meant for another file.
+- Pressing **Esc during a move, resize or arrow drag** kept the change on screen but never saved it.
+- If you made a change while a save was in progress, that change could be **marked as saved when it wasn't**, and then dropped when you opened the tables.
+- Opening a file through a **symbolic link** and editing it replaced the link with a separate copy; it now writes the real file and keeps the link.
+
+**Fixed: errors and crashes**
+- The server **dropped the connection** (the page said "server unreachable") on: a working file that isn't text or is a folder, a folder you can't write to, absurdly nested JSON, `~nosuchuser` or a NUL in a folder path, and diagrams with lists or objects where a type, end or parent should be. All now get a clear message. Any unexpected error now returns a message too, instead of a dropped connection.
+- Upgrading an older file **crashed** on those odd values instead of rejecting the file, and didn't update **relationships** when it renamed arrows.
+- Pressing a tool key (S, H, A, F) while dragging out a box created an **invalid item that stopped all saving** (or threw an error on a plain click).
+- Starting the app when the port is in use printed a traceback; it now says so and suggests `--port`. Importing `whiteboard.__main__` no longer starts a server.
+
+**Fixed: things that didn't work as described**
+- **Esc in a table text box** didn't restore the old text once an autosave had happened while typing.
+- **The first click after editing a table cell was lost** (the table redrew under the mouse), so ticking a box, clicking an ID or Remove needed two clicks.
+- **Double-clicking an arrow's end or segment handle** (to let an end follow its box, or release a moved segment) probably never reached the handle, because the handle was redrawn between the clicks; it now isn't.
+- **Z-shaped arrows bent right next to the target box** instead of half way: the router didn't count the final turn onto the arrow's stub as a bend. It now prefers arriving straight in.
+- A moved segment whose pin ended up at a corner was claimed by **both** neighbouring segments, so dragging the other one moved the pin.
+- Two moved segments at exactly the same spot merged, leaving one impossible to release.
+- **Routing is faster** on big diagrams: it no longer re-expands outdated search entries, and checks each grid point and step for boxes only once.
+
+**Tests**: 99 (was 91): unreadable files are never overwritten and Save as rescues the drawing; unreadable working files and unwritable folders give reasons; seven kinds of odd request get an answer instead of a dropped connection; a save meant for another file is refused; saving through links keeps them; upgrading odd values rejects instead of crashing, and relationships follow renamed arrows.
+
+**Not verified**: the JavaScript fixes have not been run (no browser or JavaScript engine here).
+
+---
+
 ## 0.13.0, 2026-10-30: Relationships between arrows
 
 On branch `FeddbackControlActionRelation`.

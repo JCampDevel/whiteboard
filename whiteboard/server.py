@@ -17,7 +17,7 @@ import mimetypes
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import model
 
@@ -25,6 +25,7 @@ STATIC = Path(__file__).parent / "static"
 PAGES = {"/": "index.html", "/app.js": "app.js", "/route.js": "route.js", "/style.css": "style.css"}
 MAX_BODY = 5 * 1024 * 1024
 API_HEADER = "X-Whiteboard"
+FILE_HEADER = "X-Whiteboard-File"  # on an autosave: the file the page thinks it is editing (URL-encoded)
 
 
 class HttpError(Exception):
@@ -37,12 +38,23 @@ def file_info(path: Path) -> dict:
     return {"path": str(path), "name": path.name, "dir": str(path.parent)}
 
 
+def as_folder(directory: str) -> Path:
+    """A folder path typed or sent by the page, as an absolute path (or a 400 explaining what is wrong)."""
+    try:
+        folder = Path(directory).expanduser()  # RuntimeError for ~someone who doesn't exist
+        if not folder.is_absolute():
+            raise HttpError(400, "the folder must be a full path")
+        folder.stat()  # ValueError for a NUL in the path; missing folders are reported by the caller
+    except (RuntimeError, ValueError) as exc:
+        raise HttpError(400, f"{directory} is not a usable folder: {exc}")
+    except OSError:
+        pass
+    return folder
+
+
 def browse(directory: str) -> dict:
     """The sub-folders and .json files in a folder (hidden ones left out), for the Save / Open dialogs."""
-    folder = Path(directory).expanduser()
-    if not folder.is_absolute():
-        raise HttpError(400, "the folder must be a full path")
-    folder = folder.resolve()
+    folder = as_folder(directory).resolve()
     try:
         entries = list(folder.iterdir())
     except FileNotFoundError:
@@ -51,6 +63,8 @@ def browse(directory: str) -> dict:
         raise HttpError(400, f"{folder} is not a folder")
     except PermissionError:
         raise HttpError(403, f"you don't have permission to open {folder}")
+    except OSError as exc:
+        raise HttpError(400, f"{folder} can't be opened: {exc.strerror or exc}")
 
     def kind(entry: Path) -> str | None:
         if entry.name.startswith("."):
@@ -83,16 +97,17 @@ def target_path(directory, name) -> Path:
         raise HttpError(400, f"{name or 'an empty name'} is not a valid file name")
     if not name.lower().endswith(".json"):
         name += ".json"
-    folder = Path(directory).expanduser()
-    if not folder.is_absolute():
-        raise HttpError(400, "the folder must be a full path")
+    folder = as_folder(directory)
     if not folder.is_dir():
         raise HttpError(400, f"there is no folder {folder}")
-    return folder.resolve() / name
+    # A symbolic link means the file it points to, so saving later writes that file and keeps the link.
+    return (folder.resolve() / name).resolve()
 
 
 def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
-    state = {"file": Path(diagram_file).resolve()}  # the file being worked on; Save as / Open change it
+    # The file being worked on (Save as / Open change it), and why it couldn't be read, if it couldn't:
+    # then autosave refuses to write, so a file this app can't open is never replaced by an empty diagram.
+    state = {"file": Path(diagram_file).resolve(), "load_error": None}
     lock = threading.Lock()  # one read or write of the working file at a time
 
     class Handler(BaseHTTPRequestHandler):
@@ -123,7 +138,7 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
                 raise HttpError(413, "diagram too large")
             try:
                 return json.loads(self.rfile.read(length))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
                 raise HttpError(400, "body is not valid JSON")
 
         def _handle(self, routes: dict) -> None:
@@ -136,6 +151,8 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
                 route(url)
             except HttpError as exc:
                 self._json(exc.status, exc.payload)
+            except Exception as exc:  # a bug: still answer, so the page shows a reason, not "server unreachable"
+                self._json(500, {"error": f"internal error: {exc!r}"})
 
         # ---------- GET ----------
         def do_GET(self):
@@ -147,11 +164,14 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             })
 
         def _load_current(self) -> model.Diagram:
-            try:
-                with lock:
-                    return model.load(state["file"])
-            except model.DiagramError as exc:
-                raise HttpError(500, str(exc))
+            with lock:
+                try:
+                    diagram = model.load(state["file"])
+                except (ValueError, OSError) as exc:  # DiagramError is a ValueError
+                    state["load_error"] = str(exc) if isinstance(exc, ValueError) else f"{state['file']}: {exc.strerror or exc}"
+                    raise HttpError(500, state["load_error"])
+                state["load_error"] = None
+                return diagram
 
         def _get_diagram(self, url):
             self._json(200, self._load_current().to_dict())
@@ -182,8 +202,19 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
 
         def _put_diagram(self, url):
             diagram = self._valid(self._body())
+            claimed = self.headers.get(FILE_HEADER)
             with lock:
-                model.save(diagram, state["file"])
+                current = state["file"]
+                if state["load_error"]:
+                    raise HttpError(409, f"{current.name} couldn't be opened ({state['load_error']}), so it is not "
+                                         "being overwritten. Use Save as… to keep this drawing in another file.")
+                if claimed is not None and unquote(claimed) != str(current):
+                    # Sent for a file that has since been switched away from (Open / Save as while it was in flight).
+                    raise HttpError(409, f"not saved: this change was for {unquote(claimed)}, but the file open now is {current}")
+                try:
+                    model.save(diagram, current)
+                except OSError as exc:
+                    raise HttpError(500, f"could not save {current.name}: {exc.strerror or exc}")
             self._json(200, {"ok": True})
 
         # ---------- POST: Save as / Open ----------
@@ -198,14 +229,14 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             diagram = self._valid(body.get("diagram"))
             if path.is_dir():
                 raise HttpError(400, f"{path.name} is a folder")
-            if path.exists() and body.get("overwrite") is not True:
+            if (path.exists() or path.is_symlink()) and body.get("overwrite") is not True:
                 raise HttpError(409, f"{path.name} already exists", exists=True, name=path.name)
             with lock:
                 try:
                     model.save(diagram, path)
                 except OSError as exc:
                     raise HttpError(400, f"could not save {path.name}: {exc.strerror or exc}")
-                state["file"] = path
+                state["file"], state["load_error"] = path, None
             self._json(200, {"file": file_info(path)})
 
         def _open(self, url):
@@ -220,7 +251,7 @@ def make_server(diagram_file: Path, host: str = "127.0.0.1", port: int = 8000):
             except (ValueError, OSError) as exc:  # DiagramError is a ValueError; so is bad UTF-8
                 raise HttpError(400, f"{path.name} can't be opened: {exc}")
             with lock:
-                state["file"] = path
+                state["file"], state["load_error"] = path, None
             self._json(200, {"file": file_info(path), "diagram": diagram.to_dict()})
 
         def log_message(self, *args):

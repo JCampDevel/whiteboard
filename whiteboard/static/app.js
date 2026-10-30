@@ -233,7 +233,10 @@ function segmentRuns(path) {
   return runs.filter(r => r.from > 0 && r.to < path.length - 1).map(r => {
     let via = null;
     for (let k = r.from + 1; k < r.to; k++) if (path[k].via !== undefined) via = path[k].via;
-    if (via === null) via = path[r.from].via ?? path[r.to].via ?? null; // an older pinned corner
+    if (via === null) { // a pin at a corner: an older corner pin (no axis), or one on this run's axis
+      const corner = [path[r.from], path[r.to]].find(q => q.via !== undefined && (q.axis === undefined || q.axis === r.axis));
+      via = corner ? corner.via : null;
+    }
     const a = path[r.from], b = path[r.to];
     return {
       ...r, via, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
@@ -412,18 +415,22 @@ function toggle(id) {
 
 // ---------- saving ----------
 function setStatus(text) { statusEl.textContent = text; statusEl.title = text; }
+let changes = 0; // counts edits, so a save that finishes after a newer edit doesn't mark that edit saved
 function changed() {
+  changes++;
   dirty = true;
   setStatus("Unsaved…");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, 400);
 }
 async function save() {
+  const sent = changes;
   try {
-    const r = await api("/api/diagram", {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(diagram),
-    });
-    if (r.ok) { dirty = false; setStatus("Saved"); await loadTables(); }
+    // The server refuses it if the file being worked on has changed since (Open / Save as in between).
+    const headers = currentFile ? { "X-Whiteboard-File": encodeURIComponent(currentFile.path) } : {};
+    const r = await api("/api/diagram", { method: "PUT", headers, body: JSON.stringify(diagram) });
+    if (r.ok && sent === changes) { dirty = false; setStatus("Saved"); }
+    if (r.ok) await loadTables();
     else setStatus("Not saved: " + ((await r.json()).error || r.status));
   } catch { setStatus("Not saved: server unreachable"); }
 }
@@ -574,7 +581,14 @@ document.addEventListener("keydown", (ev) => {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (ev.key === " ") { spaceDown = true; updateCursor(); ev.preventDefault(); }
   else if (ev.key === "Delete" || ev.key === "Backspace") { deleteSelected(); ev.preventDefault(); }
-  else if (ev.key === "Escape") { drag = null; $("overlay").replaceChildren(); setSelection([]); setTool("select"); }
+  else if (ev.key === "Escape") {
+    // A move, resize or arrow edit has already changed the diagram as the mouse moved: keep it, and save it.
+    if (drag && drag.moved && ["move", "resize", "anchor", "segment"].includes(drag.mode)) changed();
+    drag = null;
+    $("overlay").replaceChildren();
+    setSelection([]);
+    setTool("select");
+  }
   else if (ev.key.toLowerCase() === "t") toggleDock();
   else if (KEYS[ev.key.toLowerCase()]) setTool(KEYS[ev.key.toLowerCase()]);
 });
@@ -637,7 +651,7 @@ board.addEventListener("mousedown", (ev) => {
       if (!additive) setSelection([]);
     }
   } else if (NODE_TOOLS.includes(tool)) {
-    drag = { mode: "create", start: p };
+    drag = { mode: "create", start: p, type: tool };
   } else if (EDGE_TOOLS.includes(tool) && n) {
     drag = { mode: "connect", from: n, anchor: attachAt(n, p), type: tool, moved: false };
   }
@@ -725,7 +739,7 @@ window.addEventListener("mousemove", (ev) => {
     el("rect", {
       x: Math.min(drag.start.x, p.x), y: Math.min(drag.start.y, p.y),
       width: Math.abs(p.x - drag.start.x), height: Math.abs(p.y - drag.start.y),
-      fill: "none", style: `stroke:${paint(pen[tool])}`, "stroke-dasharray": "4 4", "stroke-width": 2,
+      fill: "none", style: `stroke:${paint(pen[drag.type])}`, "stroke-dasharray": "4 4", "stroke-width": 2,
     }, ov);
   } else if (drag.mode === "connect") {
     const over = hit(p), target = over && over !== drag.from ? over : null;
@@ -757,22 +771,21 @@ window.addEventListener("mouseup", (ev) => {
   updateCursor();
 
   if (d.mode === "move" || d.mode === "resize" || d.mode === "anchor" || d.mode === "segment") {
-    if (d.moved) changed();
+    if (d.moved) { changed(); render(); } // render also clears the connect highlight
     else if (d.collapse) setSelection([d.id]);
-    render(); // clears the connect highlight
   } else if (d.mode === "create") {
     let x = Math.min(d.start.x, p.x), y = Math.min(d.start.y, p.y);
     let w = Math.abs(p.x - d.start.x), h = Math.abs(p.y - d.start.y);
     if (w < MIN_SIZE && h < MIN_SIZE) { // plain click: default size, centred on the click
-      ({ w, h } = DEFAULT_SIZE[tool]);
+      ({ w, h } = DEFAULT_SIZE[d.type]);
       x = d.start.x - w / 2; y = d.start.y - h / 2;
     }
     const n = {
-      id: newId(tool), type: tool, x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h),
-      label: TYPE_NAMES[tool], colour: pen[tool], shown: [...DEFAULT_SHOWN],
+      id: newId(d.type), type: d.type, x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h),
+      label: TYPE_NAMES[d.type], colour: pen[d.type], shown: [...DEFAULT_SHOWN],
     };
     diagram.nodes.push(n);
-    if (tool === "controller") { // every Controller is born with its two inner boxes
+    if (d.type === "controller") { // every Controller is born with its two inner boxes
       for (const type of CHILD_TYPES) {
         diagram.nodes.push({
           id: newId(type), type, parent: n.id, x: n.x, y: n.y, w: MIN_SIZE, h: MIN_SIZE,
@@ -1293,7 +1306,10 @@ function textCell(item, key) {
   return span;
 }
 
+let editingOriginal = ""; // the text before this edit began (the box is rebuilt by every autosave)
 function startEditing(id, key = "name") {
+  const item = itemById(id) || relById(id);
+  editingOriginal = item ? textOf(item, key) : "";
   editing = `${id}:${key}`;
   renderDock();
   const box = tablesEl.querySelector(`input[data-edit="${editing}"]`);
@@ -1303,22 +1319,23 @@ function startEditing(id, key = "name") {
 // Typing changes the diagram at once. Enter keeps it, Esc puts the old text back.
 function textInput(item, key) {
   const box = document.createElement("input");
-  const original = textOf(item, key), mine = `${item.id}:${key}`;
+  const current = textOf(item, key), mine = `${item.id}:${key}`;
   box.type = "text";
   box.className = "name-input";
   box.maxLength = TEXT_LIMIT[key];
-  box.value = original;
+  box.value = current;
   box.dataset.edit = mine;
   box.setAttribute("aria-label", `${key} of ${item.id}`);
   box.addEventListener("input", () => { setText(item, key, box.value.slice(0, TEXT_LIMIT[key])); render(); changed(); });
   box.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") { setText(item, key, original); render(); changed(); }
+    if (ev.key === "Escape") { setText(item, key, editingOriginal); render(); changed(); }
     if (ev.key === "Enter" || ev.key === "Escape") box.blur();
   });
   box.addEventListener("blur", () => {
     if (rebuilding || editing !== mine) return;
     editing = null;
-    renderDock();
+    // Not a whole-table redraw: that would happen mid-click and swallow the click that moved focus away.
+    box.replaceWith(textCell(item, key));
   });
   return box;
 }

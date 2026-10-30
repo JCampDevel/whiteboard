@@ -383,8 +383,12 @@ def migrate(raw):
         return raw
     items = [i for i in nodes + edges if isinstance(i, dict)]
 
+    # Values are only used as keys when they are strings: anything else is left for from_dict to reject.
+    def text(value):
+        return value if isinstance(value, str) else None
+
     def conforming(item):
-        prefix = ID_PREFIX.get(item.get("type"))
+        prefix = ID_PREFIX.get(text(item.get("type")))
         return prefix is not None and isinstance(item.get("id"), str) and re.fullmatch(re.escape(prefix) + r"\d+", item["id"])
 
     used = {i["id"] for i in items if conforming(i)}
@@ -398,26 +402,29 @@ def migrate(raw):
                 used.add(f"{prefix}{counters[prefix]}")
                 return f"{prefix}{counters[prefix]}"
 
-    # Only boxes are ever referred to (by arrows and inner boxes), so only their renames are looked up.
-    # Keeping arrows out matters: an old arrow id like "CA1" can equal a new box id.
-    renamed = {}
+    # Boxes are referred to by arrows and inner boxes; arrows by relationships. The two renamings are kept
+    # apart because an old arrow id like "CA1" can equal a new box id.
+    renamed, arrow_renamed = {}, {}
     for item in items:
-        if item.get("type") in ID_PREFIX and not conforming(item) and isinstance(item.get("id"), str):
+        if text(item.get("type")) in ID_PREFIX and not conforming(item) and isinstance(item.get("id"), str):
             new = fresh(item["type"])
-            if item["type"] in NODE_TYPES:
-                renamed[item["id"]] = new
+            (renamed if item["type"] in NODE_TYPES else arrow_renamed)[item["id"]] = new
             item["id"] = new
     for item in items:
         for key in ("source", "target", "parent"):
-            if item.get(key) in renamed:
+            if text(item.get(key)) in renamed:
                 item[key] = renamed[item[key]]
+    relationships = raw.get("relationships")
+    for r in relationships if isinstance(relationships, list) else []:
+        if isinstance(r, dict) and isinstance(r.get("arrows"), list):
+            r["arrows"] = [arrow_renamed.get(a, a) if isinstance(a, str) else a for a in r["arrows"]]
 
     # Arrows used to default to near-black, which vanishes on the dark theme; that default is now "auto".
     for e in edges:
         if isinstance(e, dict) and e.get("colour") == "#111827":
             e["colour"] = AUTO_COLOUR
 
-    have = {(n.get("parent"), n.get("type")) for n in nodes if isinstance(n, dict)}
+    have = {(text(n.get("parent")), text(n.get("type"))) for n in nodes if isinstance(n, dict)}
     for c in [n for n in nodes if isinstance(n, dict) and n.get("type") == "controller" and isinstance(n.get("id"), str)]:
         for child_type in CHILD_TYPES:
             if (c["id"], child_type) not in have:
@@ -531,15 +538,20 @@ def load(path: Path) -> Diagram:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return Diagram()
+    except UnicodeDecodeError:
+        raise DiagramError(f"{path} is not a text file") from None
     try:
         return Diagram.from_dict(migrate(json.loads(text)))
     except json.JSONDecodeError as exc:
         raise DiagramError(f"{path} is not valid JSON: {exc}") from exc
+    except RecursionError:  # absurdly deep nesting
+        raise DiagramError(f"{path} is not a diagram (it is nested too deeply)") from None
 
 
 def save(diagram: Diagram, path: Path) -> None:
-    """Write atomically so a crash never leaves a half-written file."""
-    path = Path(path)
+    """Write atomically so a crash never leaves a half-written file. If path is a symbolic link, the file
+    it points to is written (the link stays a link)."""
+    path = Path(path).resolve()
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(diagram.to_dict(), indent=2), encoding="utf-8")
     tmp.replace(path)

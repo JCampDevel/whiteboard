@@ -435,6 +435,20 @@ class Migration(unittest.TestCase):
         d = Diagram.from_dict(model.migrate(raw))
         self.assertEqual([e.colour for e in d.edges], ["auto", "#ff0000"])
 
+    def test_odd_values_are_left_for_validation_not_a_crash(self):
+        for raw in ({"nodes": [{"type": []}], "edges": []},
+                    {"nodes": [], "edges": [{"id": "e1", "type": "feedback", "source": [1], "target": {}}]},
+                    {"nodes": [{"id": "x", "type": "controller", "parent": {}}], "edges": []}):
+            with self.subTest(raw=raw), self.assertRaises(DiagramError):
+                Diagram.from_dict(model.migrate(raw))
+
+    def test_relationships_follow_renamed_arrows(self):
+        raw = {"nodes": [node("C1"), node("CP1", "controlled_process")],
+               "edges": [edge("e1", "C1", "CP1"), edge("e2", "CP1", "C1", "feedback")],
+               "relationships": [{"id": "R1", "arrows": ["e1", "e2"]}]}
+        d = Diagram.from_dict(model.migrate(raw))
+        self.assertEqual(d.relationships[0].arrows, ["A1", "F1"])
+
     def test_migrating_twice_changes_nothing(self):
         once = model.migrate(self.OLD)
         self.assertEqual(model.migrate(once), once)
